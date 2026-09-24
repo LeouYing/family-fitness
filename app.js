@@ -1,4 +1,4 @@
-/* Family Fitness app
+/* Family Fitness app (v2)
    Plain JavaScript, no build step. Screens are drawn by the view*() functions,
    clicks are handled in onClick(), forms in onSubmit(). */
 (() => {
@@ -26,21 +26,22 @@
 
   const COLORS = ['#3B6FD8', '#E0567A', '#2FA37A', '#8B5CF6', '#F08A24', '#1FA6B8', '#B8862B', '#64748B'];
 
+  // accumulates: whether adding entries up makes sense (for monthly totals)
   const UNIT_TYPES = {
-    reps:     { label: 'Reps',     units: ['reps'] },
-    weight:   { label: 'Weight',   units: ['kg', 'lb'] },
-    duration: { label: 'Time',     units: [''] },
-    distance: { label: 'Distance', units: ['km', 'mi', 'm'] },
-    custom:   { label: 'Other',    units: null },
+    reps:     { label: 'Reps',     units: ['reps'],           accumulates: true },
+    weight:   { label: 'Weight',   units: ['kg', 'lb'],       accumulates: false },
+    duration: { label: 'Time',     units: [''],               accumulates: false },
+    distance: { label: 'Distance', units: ['km', 'mi', 'm'],  accumulates: true },
+    custom:   { label: 'Other',    units: null,               accumulates: true },
   };
 
   const SUGGESTIONS = [
-    { name: 'Push-ups',     unit_type: 'reps',     unit_label: 'reps', higher_is_better: true },
-    { name: 'Squats',       unit_type: 'reps',     unit_label: 'reps', higher_is_better: true },
-    { name: 'Plank',        unit_type: 'duration', unit_label: '',     higher_is_better: true },
-    { name: 'Walk',         unit_type: 'distance', unit_label: 'km',   higher_is_better: true },
-    { name: '5 km run',     unit_type: 'duration', unit_label: '',     higher_is_better: false },
-    { name: 'Skipping rope', unit_type: 'reps',    unit_label: 'skips', higher_is_better: true },
+    { name: 'Push-ups',      unit_type: 'reps',     unit_label: 'reps',  higher_is_better: true },
+    { name: 'Squats',        unit_type: 'reps',     unit_label: 'reps',  higher_is_better: true },
+    { name: 'Plank',         unit_type: 'duration', unit_label: '',      higher_is_better: true },
+    { name: 'Walk',          unit_type: 'distance', unit_label: 'km',    higher_is_better: true },
+    { name: '5 km run',      unit_type: 'duration', unit_label: '',      higher_is_better: false },
+    { name: 'Skipping rope', unit_type: 'reps',     unit_label: 'skips', higher_is_better: true },
   ];
 
   const RANGES = [['30', 'Month'], ['90', '3 months'], ['365', 'Year'], ['all', 'All']];
@@ -67,12 +68,13 @@
   function friendly(message) {
     const m = String(message || '');
     if (m.includes('FAMILY_NOT_FOUND')) return 'No family uses that code. Check the letters and try again.';
-    if (m.includes('NOT_IN_FAMILY')) return 'That item is no longer in this family. Pull down or reopen the app to refresh.';
+    if (m.includes('NOT_IN_FAMILY')) return 'That item is no longer in this family. Reopen the app to refresh.';
     if (m.includes('NAME_REQUIRED')) return 'Enter a name first.';
     if (m.includes('TOO_MANY_MEMBERS')) return 'This family has reached the 30-member limit.';
     if (m.includes('BAD_VALUE')) return 'Enter a number of 0 or more.';
+    if (m.includes('BAD_GOAL')) return 'That goal doesn’t fit this exercise. Check the goal type and date.';
     if (m.includes('Could not find the function') || m.includes('PGRST202'))
-      return 'The database isn’t set up yet. Run supabase-setup.sql in Supabase (README step 2).';
+      return 'The database needs updating. Run supabase-setup.sql again in Supabase (see README).';
     if (m.includes('Invalid API key') || m.includes('No API key'))
       return 'The key in config.js isn’t accepted. Copy the publishable key again (README step 3).';
     if (/fetch|network|Load failed/i.test(m)) return 'Couldn’t reach the server. Check your internet connection and try again.';
@@ -93,6 +95,11 @@
     try {
       const d = await rpc('get_family', { p_code: state.code });
       d.entries.forEach((e) => { e.value = Number(e.value); });
+      d.goals = (d.goals || []).map((g) => ({
+        ...g,
+        target_value: Number(g.target_value),
+        start_value: g.start_value == null ? null : Number(g.start_value),
+      }));
       state.data = d;
       state.code = d.family.code;
       store.set('ff_code', state.code);
@@ -128,14 +135,24 @@
   const memberById = (id) => state.data.members.find((m) => m.id === id);
   const exerciseById = (id) => state.data.exercises.find((e) => e.id === id);
   const entriesFor = (exId) => state.data.entries.filter((e) => e.exercise_id === exId);
+  const goalFor = (exId) => state.data.goals.find((g) => g.exercise_id === exId);
   const exercisesOf = (memberId, archived = false) =>
     state.data.exercises.filter((e) => e.member_id === memberId && !!e.archived === archived);
 
-  // Dates are stored as "YYYY-MM-DD" in the person's local calendar
+  // ----- Dates ("YYYY-MM-DD" in the person's own calendar) -----
   function isoFromDate(d) { return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`; }
-  function todayISO() { return isoFromDate(new Date()); }
-  function daysAgoISO(n) { const d = new Date(); d.setDate(d.getDate() - n); return isoFromDate(d); }
   function parseISO(s) { const [y, m, d] = s.split('-').map(Number); return new Date(y, m - 1, d); }
+  function addDays(d, n) { const x = new Date(d.getFullYear(), d.getMonth(), d.getDate()); x.setDate(x.getDate() + n); return x; }
+  function todayISO() { return isoFromDate(new Date()); }
+  function daysAgoISO(n) { return isoFromDate(addDays(new Date(), -n)); }
+  function daysBetween(aISO, bISO) { return Math.round((parseISO(bISO) - parseISO(aISO)) / 86400000); }
+  function mondayOf(d) { const x = new Date(d.getFullYear(), d.getMonth(), d.getDate()); return addDays(x, -((x.getDay() + 6) % 7)); }
+  function monthStartISO() { const d = new Date(); return isoFromDate(new Date(d.getFullYear(), d.getMonth(), 1)); }
+  function monthEndISO() { const d = new Date(); return isoFromDate(new Date(d.getFullYear(), d.getMonth() + 1, 0)); }
+  function lastMonthRange() {
+    const d = new Date();
+    return [isoFromDate(new Date(d.getFullYear(), d.getMonth() - 1, 1)), isoFromDate(new Date(d.getFullYear(), d.getMonth(), 0))];
+  }
   function fmtDate(s) {
     const d = parseISO(s);
     const opts = { day: 'numeric', month: 'short' };
@@ -143,13 +160,21 @@
     return d.toLocaleDateString(undefined, opts);
   }
   function relDay(s) {
-    const diff = Math.round((parseISO(todayISO()) - parseISO(s)) / 86400000);
+    const diff = daysBetween(s, todayISO());
     if (diff <= 0) return 'Today';
     if (diff === 1) return 'Yesterday';
     if (diff < 7) return `${diff} days ago`;
     return fmtDate(s);
   }
+  function timeLeft(days) {
+    if (days <= 0) return 'due today';
+    if (days === 1) return '1 day left';
+    if (days < 14) return `${days} days left`;
+    if (days < 70) return `${Math.round(days / 7)} weeks left`;
+    return `${Math.round(days / 30)} months left`;
+  }
 
+  // ----- Numbers -----
   function fmtDuration(sec) {
     sec = Math.max(0, Math.round(sec));
     const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
@@ -164,18 +189,32 @@
     if (ex.unit_type === 'duration') return 'time';
     return ex.unit_label || UNIT_TYPES[ex.unit_type].label.toLowerCase();
   }
+  const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
 
+  // ----- Progress maths -----
   const isBetter = (ex, a, b) => (ex.higher_is_better ? a > b : a < b);
+  const meets = (ex, v, target) => (ex.higher_is_better ? v >= target : v <= target);
+
+  // One point per day: the best set that day (keeps charts smooth when logging sets)
+  function dailyBest(ex, list) {
+    const map = new Map();
+    list.forEach((e) => {
+      const cur = map.get(e.date);
+      if (!cur || isBetter(ex, e.value, cur.value)) map.set(e.date, { date: e.date, value: e.value, id: e.id });
+    });
+    return Array.from(map.values()).sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+  }
 
   function statsFor(ex, list) {
-    if (!list.length) return null;
-    const latest = list[list.length - 1];
-    const first = list[0];
-    let best = list[0];
-    list.forEach((e) => { if (isBetter(ex, e.value, best.value)) best = e; });
+    const daily = dailyBest(ex, list);
+    if (!daily.length) return null;
+    const latest = daily[daily.length - 1];
+    const first = daily[0];
+    let best = daily[0];
+    daily.forEach((d) => { if (isBetter(ex, d.value, best.value)) best = d; });
     const change = latest.value - first.value;
     const mood = change === 0 ? 'flat' : ((ex.higher_is_better ? change > 0 : change < 0) ? 'good' : 'bad');
-    return { latest, first, best, change, mood, count: list.length };
+    return { latest, first, best, change, mood, days: daily.length, count: list.length };
   }
   function fmtChange(ex, change) {
     if (change === 0) return 'No change';
@@ -190,25 +229,97 @@
     return list.filter((e) => e.date >= cutoff);
   }
 
-  // Which of the last 7 days (oldest first) this person logged anything
-  function weekDays(memberId) {
-    const days = new Set(state.data.entries.filter((e) => e.member_id === memberId).map((e) => e.date));
-    return Array.from({ length: 7 }, (_, i) => days.has(daysAgoISO(6 - i)));
+  // ----- Goals -----
+  function goalProgress(ex, g) {
+    const today = todayISO();
+    const entries = entriesFor(ex.id);
+
+    if (g.kind === 'monthly') {
+      const start = monthStartISO();
+      const total = entries.filter((e) => e.date >= start && e.date <= today).reduce((s, e) => s + e.value, 0);
+      return {
+        kind: 'monthly', total,
+        pct: Math.min(1, total / g.target_value),
+        reached: total >= g.target_value,
+        remaining: Math.max(0, g.target_value - total),
+        daysLeft: daysBetween(today, monthEndISO()) + 1, // including today
+      };
+    }
+
+    // Target by a date: counts entries from the day it was set until the due date
+    const inWindow = entries.filter((e) => e.date >= g.start_date && e.date <= g.due_date);
+    let current = null, reachedDate = null;
+    inWindow.slice().sort((a, b) => (a.date < b.date ? -1 : 1)).forEach((e) => {
+      if (current === null || isBetter(ex, e.value, current)) current = e.value;
+      if (!reachedDate && meets(ex, e.value, g.target_value)) reachedDate = e.date;
+    });
+    let base = g.start_value;
+    if (base == null) base = inWindow.length ? dailyBest(ex, inWindow)[0].value : (ex.higher_is_better ? 0 : null);
+    const reached = !!reachedDate;
+    let pct = 0;
+    if (reached) pct = 1;
+    else if (current !== null && base !== null && g.target_value !== base) {
+      pct = Math.max(0, Math.min(1, (current - base) / (g.target_value - base)));
+    }
+    const daysLeft = daysBetween(today, g.due_date);
+    const span = Math.max(1, daysBetween(g.start_date, g.due_date));
+    const expected = Math.max(0, Math.min(1, daysBetween(g.start_date, today) / span));
+    return {
+      kind: 'target', current, pct, reached, reachedDate, daysLeft,
+      overdue: !reached && daysLeft < 0,
+      onTrack: pct >= expected - 0.1,
+    };
   }
 
-  function sparkline(list, color, w = 120, h = 40) {
+  // Short version for Home and Family (null = nothing to show)
+  function goalMini(ex) {
+    const g = goalFor(ex.id);
+    if (!g) return null;
+    const p = goalProgress(ex, g);
+    if (p.kind === 'target' && p.overdue) return null;
+    const pct = Math.round(p.pct * 100);
+    return { pct, reached: p.reached, kind: p.kind };
+  }
+
+  // ----- Weekly habit (weeks run Monday to Sunday) -----
+  function activeDates(memberId) {
+    return new Set(state.data.entries.filter((e) => e.member_id === memberId).map((e) => e.date));
+  }
+  function weekInfo(memberId) {
+    const set = activeDates(memberId);
+    const mon = mondayOf(new Date());
+    const today = todayISO();
+    const days = Array.from({ length: 7 }, (_, i) => {
+      const d = addDays(mon, i);
+      const iso = isoFromDate(d);
+      return { iso, on: set.has(iso), today: iso === today, letter: d.toLocaleDateString(undefined, { weekday: 'narrow' }) };
+    });
+    return { days, count: days.filter((d) => d.on).length };
+  }
+  function weeklyStreak(member) {
+    const goal = member.weekly_goal;
+    if (!goal) return 0;
+    const set = activeDates(member.id);
+    const mon = mondayOf(new Date());
+    const countWeek = (start) => { let c = 0; for (let i = 0; i < 7; i++) if (set.has(isoFromDate(addDays(start, i)))) c++; return c; };
+    let streak = countWeek(mon) >= goal ? 1 : 0; // this week counts once it's met
+    for (let w = 1; w < 520 && countWeek(addDays(mon, -7 * w)) >= goal; w++) streak++;
+    return streak;
+  }
+
+  function sparkline(points, color, w = 120, h = 40) {
     const p = 5;
-    if (!list.length) {
+    if (!points.length) {
       return `<svg class="spark" viewBox="0 0 ${w} ${h}" aria-hidden="true">
         <line x1="${p}" y1="${h / 2}" x2="${w - p}" y2="${h / 2}" stroke="var(--line)" stroke-width="2" stroke-dasharray="4 5"/></svg>`;
     }
-    const xs = list.map((e) => parseISO(e.date).getTime());
-    const ys = list.map((e) => e.value);
+    const xs = points.map((e) => parseISO(e.date).getTime());
+    const ys = points.map((e) => e.value);
     const minX = Math.min(...xs), maxX = Math.max(...xs);
     const minY = Math.min(...ys), maxY = Math.max(...ys);
     const px = (x) => (maxX === minX ? w / 2 : p + ((x - minX) / (maxX - minX)) * (w - 2 * p));
     const py = (y) => (maxY === minY ? h / 2 : h - p - ((y - minY) / (maxY - minY)) * (h - 2 * p));
-    const pts = list.map((e, i) => `${px(xs[i]).toFixed(1)},${py(ys[i]).toFixed(1)}`);
+    const pts = points.map((e, i) => `${px(xs[i]).toFixed(1)},${py(ys[i]).toFixed(1)}`);
     const last = pts[pts.length - 1].split(',');
     return `<svg class="spark" viewBox="0 0 ${w} ${h}" aria-hidden="true">
       ${pts.length > 1 ? `<polyline fill="none" stroke="${color}" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round" points="${pts.join(' ')}"/>` : ''}
@@ -256,16 +367,15 @@
     return s % 60 ? fmtDuration(s) : `${s / 60} min`;
   }
 
-  function stopwatchHTML(compact, useButton) {
+  function stopwatchHTML(compact) {
     const ms = swMs(), p = swParts(ms);
     const label = sw.running ? 'Pause' : ms > 0 ? 'Resume' : 'Start';
     return `<div class="timer ${compact ? 'compact' : ''}">
       <div class="clock" role="timer" aria-label="Stopwatch"><span data-sw-main>${p.main}</span><span class="tail" data-sw-tail>${p.tail}</span></div>
       <div class="timer-ctrls">
-        <button type="button" class="btn primary" data-action="sw-toggle">${label}</button>
+        <button type="button" class="btn dark" data-action="sw-toggle">${label}</button>
         <button type="button" class="btn" data-action="sw-reset" ${ms === 0 ? 'disabled' : ''}>Reset</button>
       </div>
-      ${useButton ? `<div class="timer-ctrls"><button type="button" class="btn dark" data-action="sw-use" ${ms < 1000 ? 'disabled' : ''}>Use this time</button></div>` : ''}
     </div>`;
   }
 
@@ -290,16 +400,14 @@
         <button type="button" class="btn primary" data-action="cd-toggle">${label}</button>
         <button type="button" class="btn" data-action="cd-adjust" data-delta="15" aria-label="15 seconds more">+15 s</button>
       </div>
-      ${!compact && (left < cd.total || cd.done) ? '<button type="button" class="link" data-action="cd-reset">Reset</button>' : ''}
+      ${left < cd.total || cd.done ? '<button type="button" class="link" data-action="cd-reset">Reset</button>' : ''}
     </div>`;
   }
 
   function renderTimerSlots() {
     $$('[data-timer-slot]').forEach((slot) => {
       const compact = slot.dataset.compact === '1';
-      slot.innerHTML = slot.dataset.timerSlot === 'sw'
-        ? stopwatchHTML(compact, slot.dataset.use === '1')
-        : countdownHTML(compact);
+      slot.innerHTML = slot.dataset.timerSlot === 'sw' ? stopwatchHTML(compact) : countdownHTML(compact);
     });
     const dot = $('.tabs [data-tab="timer"] .running-dot');
     const running = sw.running || cd.running;
@@ -309,6 +417,20 @@
       if (tab) tab.insertAdjacentHTML('beforeend', '<span class="running-dot" aria-hidden="true"></span>');
     }
     updateWakeLock();
+  }
+
+  // While the stopwatch runs on a time-based exercise, mirror it into the
+  // min/sec boxes (unless the person typed their own time).
+  function mirrorStopwatch() {
+    const form = $('form[data-form="log"][data-dur="1"]');
+    if (!form) return;
+    const mi = fld(form, 'min'), se = fld(form, 'sec');
+    const untouched = mi.dataset.auto === '1' || (mi.value === '' && se.value === '');
+    if (!untouched) return;
+    const s = Math.floor(swMs() / 1000);
+    mi.value = Math.floor(s / 60);
+    se.value = s % 60;
+    mi.dataset.auto = '1';
   }
 
   // Sound + vibration when the countdown ends
@@ -338,7 +460,7 @@
     beep();
     try { if (navigator.vibrate) navigator.vibrate([300, 150, 300, 150, 600]); } catch { /* ignore */ }
     renderTimerSlots();
-    toast('Time’s up!', true);
+    toast(route().name === 'exercise' ? 'Rest over. Ready for the next set.' : 'Time’s up!', true);
   }
 
   // Keep the screen awake while a timer runs (where the phone allows it)
@@ -362,8 +484,8 @@
     const ms = swMs(), p = swParts(ms);
     $$('[data-sw-main]').forEach((el) => { el.textContent = p.main; });
     $$('[data-sw-tail]').forEach((el) => { el.textContent = p.tail; });
-    $$('[data-action="sw-use"]').forEach((b) => { b.disabled = ms < 1000; });
     $$('[data-action="sw-reset"]').forEach((b) => { b.disabled = ms === 0; });
+    if (sw.running) mirrorStopwatch();
     const left = cdLeft();
     $$('[data-cd-main]').forEach((el) => { el.textContent = cdText(left); });
     $$('[data-cd-ring]').forEach((el) => {
@@ -379,38 +501,67 @@
 
   function drawDetailChart(ex, list, color) {
     const canvas = $('#ex-chart');
-    if (!canvas || !window.Chart || !list.length) return;
+    const daily = dailyBest(ex, list);
+    if (!canvas || !window.Chart || !daily.length) return;
     const css = getComputedStyle(document.documentElement);
     const muted = css.getPropertyValue('--muted').trim();
     const line = css.getPropertyValue('--line').trim();
     const accent = css.getPropertyValue('--accent').trim();
+    const goalColor = css.getPropertyValue('--goal').trim();
     const st = statsFor(ex, entriesFor(ex.id));
-    const pts = list.map((e) => ({ x: parseISO(e.date).getTime(), y: e.value, best: e.id === st.best.id }));
+    const pts = daily.map((d) => ({ x: parseISO(d.date).getTime(), y: d.value, best: d.id === st.best.id }));
     const xMin = pts[0].x, xMax = pts[pts.length - 1].x;
     const pad3 = xMin === xMax ? 3 * 86400000 : 0;
     const fmtY = (v) => (ex.unit_type === 'duration' ? fmtDuration(v) : fmtNum(v));
 
+    const datasets = [{
+      data: pts,
+      borderColor: color,
+      backgroundColor: color,
+      borderWidth: 3,
+      tension: 0.25,
+      pointRadius: pts.map((p) => (p.best ? 7 : 3.5)),
+      pointHoverRadius: 8,
+      pointBackgroundColor: pts.map((p) => (p.best ? accent : color)),
+      pointBorderColor: color,
+      pointBorderWidth: 2,
+    }];
+
+    // Dashed line for a target goal
+    const g = goalFor(ex.id);
+    const target = g && g.kind === 'target' ? g.target_value : null;
+    if (target !== null) {
+      datasets.push({
+        data: [{ x: xMin - pad3, y: target }, { x: xMax + pad3, y: target }],
+        borderColor: goalColor, borderWidth: 2, borderDash: [6, 5],
+        pointRadius: 0, pointHoverRadius: 0, tension: 0, fill: false,
+      });
+    }
+    const goalLabel = {
+      id: 'goalLabel',
+      afterDatasetsDraw(chart) {
+        if (target === null) return;
+        const pt = chart.getDatasetMeta(1).data[1];
+        if (!pt) return;
+        const ctx = chart.ctx;
+        ctx.save();
+        ctx.fillStyle = goalColor;
+        ctx.font = '700 12px "Atkinson Hyperlegible", system-ui, sans-serif';
+        ctx.textAlign = 'right';
+        ctx.fillText('Goal ' + fmtY(target), pt.x, pt.y - 7);
+        ctx.restore();
+      },
+    };
+
     charts.push(new window.Chart(canvas, {
       type: 'line',
-      data: {
-        datasets: [{
-          data: pts,
-          borderColor: color,
-          backgroundColor: color,
-          borderWidth: 3,
-          tension: 0.25,
-          pointRadius: pts.map((p) => (p.best ? 7 : 3.5)),
-          pointHoverRadius: 8,
-          pointBackgroundColor: pts.map((p) => (p.best ? accent : color)),
-          pointBorderColor: color,
-          pointBorderWidth: 2,
-        }],
-      },
+      data: { datasets },
+      plugins: [goalLabel],
       options: {
         responsive: true,
         maintainAspectRatio: false,
         animation: false,
-        layout: { padding: { top: 8, right: 8 } },
+        layout: { padding: { top: 18, right: 8 } },
         scales: {
           x: {
             type: 'linear', min: xMin - pad3, max: xMax + pad3,
@@ -430,6 +581,7 @@
           legend: { display: false },
           tooltip: {
             displayColors: false,
+            filter: (item) => item.datasetIndex === 0,
             callbacks: {
               title: (items) => new Date(items[0].parsed.x).toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' }),
               label: (item) => fmtValue(ex, item.parsed.y) + (item.raw.best ? '  (best)' : ''),
@@ -480,8 +632,6 @@
 
   // ----- Welcome: join or create -----
   function viewWelcome() {
-    const params = new URLSearchParams(location.search);
-    const prefill = params.get('join') || '';
     return `<div class="welcome">
       <div class="wordmark">Family<br>Fitness<span class="lane"></span></div>
       <p class="lede">Log your workouts, time your sets, and follow everyone’s progress.</p>
@@ -489,7 +639,7 @@
       <form data-form="join" novalidate>
         <label class="field"><span>Family code</span>
           <input class="input code" name="code" autocomplete="off" autocapitalize="characters" spellcheck="false"
-                 placeholder="ABCD-2345" maxlength="12" value="${esc(prefill)}" required>
+                 placeholder="ABCD-2345" maxlength="12" required>
         </label>
         <button class="btn primary big" type="submit">Join family</button>
         <p class="error-text" data-error hidden></p>
@@ -539,11 +689,31 @@
   }
 
   // ----- Home -----
+  function weekPanel(m) {
+    const w = weekInfo(m.id);
+    const goal = m.weekly_goal;
+    const streak = weeklyStreak(m);
+    let top;
+    if (goal) {
+      const left = goal - w.count;
+      top = `<span><strong>${w.count} of ${goal} days</strong> <span class="muted">this week</span></span>
+        <span class="small ${left <= 0 ? 'good' : 'muted'}">${left <= 0 ? 'Goal met' : `${plural(left, 'more day', 'more days')} to go`}</span>`;
+    } else {
+      top = `<span><strong>${plural(w.count, 'active day', 'active days')}</strong> <span class="muted">this week</span></span>
+        <span class="set-goal">Set a weekly goal</span>`;
+    }
+    return `<button type="button" class="panel week-panel" data-action="weekly-sheet">
+      <span class="week-top">${top}</span>
+      <span class="week-strip" style="--c:${esc(m.color)}">
+        ${w.days.map((d) => `<span class="wd ${d.on ? 'on' : ''} ${d.today ? 'today' : ''}"><i></i><small>${esc(d.letter)}</small></span>`).join('')}
+      </span>
+      ${goal && streak >= 2 ? `<span class="streak small">${streak} weeks in a row</span>` : ''}
+    </button>`;
+  }
+
   function viewHome() {
     const m = me();
     const mine = exercisesOf(m.id);
-    const week = weekDays(m.id);
-    const activeCount = week.filter(Boolean).length;
 
     let body;
     if (!mine.length) {
@@ -560,13 +730,16 @@
       <ul class="ex-list">
         ${mine.map((ex) => {
           const list = entriesFor(ex.id);
-          const last = list[list.length - 1];
+          const daily = dailyBest(ex, list);
+          const last = daily[daily.length - 1];
+          const gm = goalMini(ex);
           return `<li><a class="ex-row" href="#/exercise/${ex.id}">
             <span class="ex-name">${esc(ex.name)}</span>
             ${last
               ? `<span class="ex-latest">${esc(fmtValue(ex, last.value))}</span><span class="ex-when">${relDay(last.date)}</span>`
               : '<span class="ex-latest none">No entries yet</span><span></span>'}
-            <span class="spark-wrap"><span class="log-pill">Log</span>${sparkline(inRange(list), m.color, 104, 36)}</span>
+            ${gm ? `<span class="goal-mini ${gm.reached ? 'reached' : ''}"><span class="goal-bar sm"><i style="width:${gm.pct}%"></i></span><span>${gm.reached ? (gm.kind === 'monthly' ? 'Done this month' : 'Goal reached') : `${gm.pct}% of goal`}</span></span>` : ''}
+            <span class="spark-wrap"><span class="log-pill">Log</span>${sparkline(dailyBest(ex, inRange(list)), m.color, 104, 36)}</span>
           </a></li>`;
         }).join('')}
       </ul>
@@ -577,14 +750,40 @@
         <div><p class="kicker">${esc(state.data.family.name)}</p><h1>Hi, ${esc(m.name)}</h1></div>
         ${avatar(m, 'a', 'href="#/settings" aria-label="Settings"')}
       </header>
-      <div class="panel" style="padding:14px 16px">
-        <p><strong>${activeCount} active ${activeCount === 1 ? 'day' : 'days'}</strong> <span class="muted">in the last week</span></p>
-        <div class="week-strip" style="--c:${esc(m.color)}" aria-hidden="true">${week.map((on) => `<i class="${on ? 'on' : ''}"></i>`).join('')}</div>
-      </div>
+      ${weekPanel(m)}
       <div class="section">${body}</div>`;
   }
 
   // ----- One exercise -----
+  function goalBlock(ex, g, isMine) {
+    const p = goalProgress(ex, g);
+    const pct = Math.round(p.pct * 100);
+    const finished = p.kind === 'target' && (p.reached || p.overdue);
+    let head, foot;
+    if (p.kind === 'monthly') {
+      const month = new Date().toLocaleDateString(undefined, { month: 'long' });
+      head = `<strong>${esc(month)}:</strong> ${esc(fmtValue(ex, p.total))} of ${esc(fmtValue(ex, g.target_value))}`;
+      foot = p.reached
+        ? '<span class="good">Monthly goal reached</span>'
+        : `<span>${esc(fmtValue(ex, p.remaining))} to go</span><span>${p.daysLeft <= 1 ? 'Last day' : `${p.daysLeft} days left`}</span>`;
+    } else {
+      head = `<strong>Goal:</strong> ${esc(fmtValue(ex, g.target_value))} by ${fmtDate(g.due_date)}`;
+      if (p.reached) foot = `<span class="good">Reached on ${fmtDate(p.reachedDate)}</span>`;
+      else if (p.overdue) foot = `<span>The date has passed. ${p.current !== null ? `Your best in that time: ${esc(fmtValue(ex, p.current))}.` : ''}</span>`;
+      else {
+        foot = `<span>${g.start_value != null ? `Started at ${esc(fmtValue(ex, g.start_value))}` : 'Counting from your first entry'}</span>
+          <span class="${p.onTrack ? 'good' : ''}">${p.onTrack ? 'On track' : 'Behind pace'}, ${timeLeft(p.daysLeft)}</span>`;
+      }
+    }
+    return `<div class="goal-block ${p.reached ? 'reached' : ''}">
+      <div class="goal-head"><span>${head}</span>
+        ${isMine && !finished ? `<button type="button" class="link" data-action="goal-sheet" data-id="${ex.id}">Edit</button>` : ''}</div>
+      <div class="goal-bar" role="progressbar" aria-label="Goal progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${pct}"><i style="width:${pct}%"></i></div>
+      <div class="goal-foot">${foot}</div>
+      ${isMine && finished ? `<button type="button" class="btn wide" style="margin-top:12px" data-action="goal-sheet" data-id="${ex.id}" data-fresh="1">Set a new goal</button>` : ''}
+    </div>`;
+  }
+
   function viewExercise(id) {
     const ex = exerciseById(id);
     if (!ex) {
@@ -597,12 +796,17 @@
     const list = inRange(all);
     const st = statsFor(ex, all);
     const isDur = ex.unit_type === 'duration';
+    const restable = ex.unit_type !== 'distance';
+    const goal = goalFor(ex.id);
+    const todays = all.filter((e) => e.date === todayISO());
 
     const logForm = isMine ? `
-      <form class="panel" data-form="log" data-ex="${ex.id}" novalidate>
-        <h3 style="margin-bottom:12px">Log ${esc(unitWord(ex))}</h3>
+      <form class="panel" data-form="log" data-ex="${ex.id}" data-dur="${isDur ? 1 : 0}" novalidate>
+        <div class="log-head"><h3>Log ${esc(unitWord(ex))}</h3>
+          ${todays.length ? `<span class="muted small">Today: ${todays.map((e) => esc(fmtValue(ex, e.value))).join(', ')}</span>` : ''}</div>
         ${isDur
-          ? `<div class="log-value dur">
+          ? `<div data-timer-slot="sw" data-compact="1"></div>
+             <div class="log-value dur">
                <input class="input" name="min" type="number" inputmode="numeric" min="0" step="1" placeholder="0" aria-label="Minutes"><span class="unit">min</span>
                <input class="input" name="sec" type="number" inputmode="numeric" min="0" max="59" step="1" placeholder="0" aria-label="Seconds"><span class="unit">sec</span>
              </div>`
@@ -614,13 +818,16 @@
           <label class="field"><span class="small">Date</span><input class="input" name="date" type="date" value="${todayISO()}" max="${todayISO()}"></label>
           <label class="field"><span class="small">Note (optional)</span><input class="input" name="note" maxlength="200" placeholder="How did it feel?"></label>
         </div>
-        <button class="btn primary big" type="submit">Save entry</button>
+        <div class="btn-row">
+          <button class="btn primary big" type="submit" value="save">Save</button>
+          ${restable ? '<button class="btn big" type="submit" value="rest">Save and rest</button>' : ''}
+        </div>
         <p class="error-text" data-error hidden></p>
       </form>
-      <div class="section">
-        <h3 style="margin-bottom:12px">${isDur ? 'Stopwatch' : 'Rest timer'}</h3>
-        <div class="panel" data-timer-slot="${isDur ? 'sw' : 'cd'}" data-compact="1" data-use="${isDur ? '1' : '0'}"></div>
-      </div>` : '';
+      ${restable ? `<div class="section" id="rest-panel">
+        <h3 style="margin-bottom:12px">Rest timer</h3>
+        <div class="panel" data-timer-slot="cd" data-compact="1"></div>
+      </div>` : ''}` : '';
 
     const statsBlock = st ? `<div class="stats">
         <div class="stat"><div class="label">Latest</div><div class="value">${esc(fmtValue(ex, st.latest.value))}</div></div>
@@ -632,12 +839,15 @@
     const historyBlock = history.length ? `<div class="section">
         <h3 style="margin-bottom:6px">History</h3>
         <ul class="history">
-          ${history.map((e) => `<li>
-            <span class="h-date">${fmtDate(e.date)}</span>
-            <span class="h-main"><span class="h-val">${esc(fmtValue(ex, e.value))}</span>${e.id === st.best.id ? '<span class="best-tag">Best</span>' : ''}
-              ${e.note ? `<br><span class="h-note">${esc(e.note)}</span>` : ''}</span>
-            ${isMine ? `<button type="button" class="icon-btn" data-action="delete-entry" data-id="${e.id}" aria-label="Delete entry from ${fmtDate(e.date)}">${ICONS.trash}</button>` : ''}
-          </li>`).join('')}
+          ${history.map((e, i) => {
+            const newDay = i === 0 || history[i - 1].date !== e.date;
+            return `<li class="${newDay ? '' : 'same-day'}">
+              <span class="h-date">${newDay ? fmtDate(e.date) : ''}</span>
+              <span class="h-main"><span class="h-val">${esc(fmtValue(ex, e.value))}</span>${e.id === st.best.id ? '<span class="best-tag">Best</span>' : ''}
+                ${e.note ? `<br><span class="h-note">${esc(e.note)}</span>` : ''}</span>
+              ${isMine ? `<button type="button" class="icon-btn" data-action="delete-entry" data-id="${e.id}" aria-label="Delete entry from ${fmtDate(e.date)}">${ICONS.trash}</button>` : ''}
+            </li>`;
+          }).join('')}
         </ul>
       </div>` : '';
 
@@ -648,11 +858,13 @@
         : `${esc(owner.name)}’s progress`}</p>
       ${logForm}
       <div class="section">
-        <div class="section-head"><h3>Progress</h3></div>
-        ${rangeChips()}
+        <div class="section-head"><h3>Progress</h3>
+          ${isMine && !goal ? `<button type="button" class="link" data-action="goal-sheet" data-id="${ex.id}">Set a goal</button>` : ''}</div>
+        ${goal ? goalBlock(ex, goal, isMine) : ''}
         ${statsBlock}
+        <div style="margin-top:16px">${rangeChips()}</div>
         ${list.length
-          ? `<div class="chart-box"><canvas id="ex-chart" aria-label="Chart of ${esc(ex.name)} over time" role="img"></canvas></div>`
+          ? `<div class="chart-box"><canvas id="ex-chart" aria-label="Chart of ${esc(ex.name)} over time, best of each day" role="img"></canvas></div>`
           : `<div class="chart-empty">${all.length ? 'No entries in this time range.' : (isMine ? 'Your chart appears after your first entry.' : 'No entries yet.')}</div>`}
       </div>
       ${historyBlock}
@@ -668,21 +880,26 @@
       ${rangeChips()}
       ${ordered.map((m) => {
         const exs = exercisesOf(m.id);
-        const active = weekDays(m.id).filter(Boolean).length;
+        const w = weekInfo(m.id);
+        const weekText = m.weekly_goal
+          ? `${w.count} of ${m.weekly_goal} days`
+          : plural(w.count, 'active day', 'active days');
         return `<section class="person" style="--c:${esc(m.color)}">
           <div class="person-head">${avatar(m)}<h2>${esc(m.name)}${m.id === state.meId ? ' <span class="muted small" style="font-family:var(--body);font-weight:400">(you)</span>' : ''}</h2>
-            <span class="active">${active} active ${active === 1 ? 'day' : 'days'}<br>this week</span></div>
+            <span class="active">${weekText}<br>this week</span></div>
           ${exs.length ? `<div class="mini-grid">
             ${exs.map((ex) => {
               const all = entriesFor(ex.id);
               const list = inRange(all);
               const st = statsFor(ex, list);
+              const gm = goalMini(ex);
               return `<a class="mini" href="#/exercise/${ex.id}">
                 <span class="m-name">${esc(ex.name)}</span>
                 ${st ? `<span class="m-latest">${esc(fmtValue(ex, st.latest.value))}</span>
-                  <span class="m-change ${st.mood}">${st.count > 1 ? esc(fmtChange(ex, st.change)) : 'First entry'}</span>`
+                  <span class="m-change ${st.mood}">${st.days > 1 ? esc(fmtChange(ex, st.change)) : 'First entry'}</span>`
                   : `<span class="m-change flat">${all.length ? 'Nothing in this range' : 'No entries yet'}</span>`}
-                ${sparkline(list, m.color, 140, 40)}
+                ${gm ? `<span class="m-goal">${gm.reached ? (gm.kind === 'monthly' ? 'Monthly goal met' : 'Goal reached') : `Goal ${gm.pct}%`}</span>` : ''}
+                ${sparkline(dailyBest(ex, list), m.color, 140, 40)}
               </a>`;
             }).join('')}
           </div>` : '<p class="muted" style="margin-top:12px">No exercises yet.</p>'}
@@ -699,9 +916,9 @@
         <button type="button" data-action="timer-tab" data-tab="stopwatch" aria-pressed="${t === 'stopwatch'}">Stopwatch</button>
         <button type="button" data-action="timer-tab" data-tab="countdown" aria-pressed="${t === 'countdown'}">Countdown</button>
       </div>
-      <div data-timer-slot="${t === 'stopwatch' ? 'sw' : 'cd'}" data-compact="0" data-use="0"></div>
+      <div data-timer-slot="${t === 'stopwatch' ? 'sw' : 'cd'}" data-compact="0"></div>
       <p class="muted small" style="text-align:center;margin-top:26px">${t === 'stopwatch'
-        ? 'To save a time, open a time-based exercise and use its stopwatch.'
+        ? 'To save a time, open a time-based exercise. Its stopwatch fills in the time for you.'
         : 'Keep this screen open for the sound. Your phone will also vibrate if it can.'}</p>`;
   }
 
@@ -752,7 +969,7 @@
           <button type="button" class="btn" data-action="switch-person">Switch person</button>
           <button type="button" class="btn danger" data-action="leave">Leave family</button>
         </div>
-        <p class="hint">Leaving only signs this phone out. Your entries stay saved.</p>
+        <p class="hint">Leaving only signs this phone out. Your entries stay saved, and you can rejoin with the invite link.</p>
       </div>`;
   }
 
@@ -798,6 +1015,7 @@
     app.classList.remove('no-tabs');
     app.innerHTML = html + tabBar(tab);
     renderTimerSlots();
+    if (sw.running || swMs() > 0) mirrorStopwatch();
 
     if (r.name === 'exercise') {
       const ex = exerciseById(r.id);
@@ -812,17 +1030,18 @@
   }
 
   // =====================================================================
-  // Pop-up sheet: new / edit exercise
+  // Pop-up sheets
   // =====================================================================
-  let sheetState = null;
+  let sheetState = null; // new / edit exercise form
 
   function openSheet(html) {
     $('#sheet-root').innerHTML = `<div class="sheet-overlay" data-action="overlay"><div class="sheet" role="dialog" aria-modal="true">${html}</div></div>`;
-    const first = $('#sheet-root input, #sheet-root button');
+    const first = $('#sheet-root input:checked, #sheet-root input, #sheet-root button');
     if (first) setTimeout(() => first.focus(), 50);
   }
   function closeSheet() { $('#sheet-root').innerHTML = ''; sheetState = null; }
 
+  // ----- New / edit exercise -----
   function exerciseSheetHTML() {
     const s = sheetState;
     const editing = !!s.id;
@@ -876,12 +1095,101 @@
 
   // Keep what's typed when the sheet redraws after a type change
   function captureSheet() {
-    const f = $('#sheet-root form');
+    const f = $('#sheet-root form[data-form="exercise"]');
     if (!f || !sheetState) return;
     sheetState.name = fld(f, 'name').value;
-    if (f.querySelector('[name=dir]:checked')) sheetState.higher_is_better = f.querySelector('[name=dir]:checked').value === 'up';
+    const dir = f.querySelector('[name=dir]:checked');
+    if (dir) sheetState.higher_is_better = dir.value === 'up';
     const ul = f.querySelector('[name=unit_label]:checked') || f.querySelector('input[name=unit_label]:not([type=radio])');
     if (ul) sheetState.unit_label = ul.value;
+  }
+
+  // ----- Goal for one exercise -----
+  function valueInputs(ex, prefix, value) {
+    if (ex.unit_type === 'duration') {
+      const s = value == null ? null : Math.round(value);
+      return `<div class="log-value dur small-inputs">
+        <input class="input" name="${prefix}_min" type="number" inputmode="numeric" min="0" step="1" placeholder="0" value="${s == null ? '' : Math.floor(s / 60)}" aria-label="Minutes"><span class="unit">min</span>
+        <input class="input" name="${prefix}_sec" type="number" inputmode="numeric" min="0" max="59" step="1" placeholder="0" value="${s == null ? '' : s % 60}" aria-label="Seconds"><span class="unit">sec</span>
+      </div>`;
+    }
+    return `<div class="log-value small-inputs">
+      <input class="input" name="${prefix}" type="number" inputmode="decimal" min="0" step="any" placeholder="0" value="${value == null ? '' : value}" aria-label="Amount">
+      ${ex.unit_label ? `<span class="unit">${esc(ex.unit_label)}</span>` : ''}
+    </div>`;
+  }
+  function readValue(ex, form, prefix) {
+    if (ex.unit_type === 'duration') {
+      const mi = fld(form, prefix + '_min').value, se = fld(form, prefix + '_sec').value;
+      if (mi === '' && se === '') return NaN;
+      if (Number(se) >= 60) return NaN;
+      return Math.round(Number(mi || 0) * 60 + Number(se || 0));
+    }
+    const v = fld(form, prefix).value;
+    return v === '' ? NaN : Number(v);
+  }
+
+  function openGoalSheet(ex, fresh) {
+    const g = fresh ? null : goalFor(ex.id);
+    const accum = UNIT_TYPES[ex.unit_type].accumulates;
+    const kind = g ? g.kind : 'target';
+    const all = entriesFor(ex.id);
+    const st = statsFor(ex, all);
+    const dueDefault = g && g.kind === 'target' ? g.due_date : isoFromDate(addDays(new Date(), 56));
+    const [lmStart, lmEnd] = lastMonthRange();
+    const lastMonth = all.filter((e) => e.date >= lmStart && e.date <= lmEnd).reduce((s, e) => s + e.value, 0);
+    const thisMonth = all.filter((e) => e.date >= monthStartISO()).reduce((s, e) => s + e.value, 0);
+
+    openSheet(`<form data-form="goal" data-ex="${ex.id}" data-fresh="${fresh ? 1 : 0}" novalidate>
+      <h2>${g ? 'Edit goal' : 'Set a goal'}</h2>
+      <p class="muted" style="margin:-8px 0 18px">${esc(ex.name)}</p>
+      ${accum ? `<fieldset><span class="legend">What kind of goal?</span><div class="choice">
+          <label><input type="radio" name="goal_kind" value="target" ${kind === 'target' ? 'checked' : ''}><span>Reach a target</span></label>
+          <label><input type="radio" name="goal_kind" value="monthly" ${kind === 'monthly' ? 'checked' : ''}><span>Monthly total</span></label>
+        </div></fieldset>` : ''}
+
+      <div data-kind-block="target" ${kind === 'target' ? '' : 'hidden'}>
+        <div class="field"><span class="legend">Target</span>
+          ${valueInputs(ex, 'target', g && g.kind === 'target' ? g.target_value : null)}
+          <p class="hint">${st ? `Now: ${esc(fmtValue(ex, st.latest.value))}. Best: ${esc(fmtValue(ex, st.best.value))}.` : 'Progress is measured from your first entry.'}</p>
+        </div>
+        <label class="field"><span>By</span>
+          <input class="input" name="due" type="date" value="${dueDefault}" min="${isoFromDate(addDays(new Date(), 1))}"></label>
+      </div>
+
+      ${accum ? `<div data-kind-block="monthly" ${kind === 'monthly' ? '' : 'hidden'}>
+        <div class="field"><span class="legend">Total each month</span>
+          ${valueInputs(ex, 'monthly', g && g.kind === 'monthly' ? g.target_value : null)}
+          <p class="hint">So far this month: ${esc(fmtValue(ex, thisMonth))}. Last month: ${esc(fmtValue(ex, lastMonth))}.</p>
+        </div>
+      </div>` : ''}
+
+      <div class="btn-row" style="margin-top:8px">
+        <button type="button" class="btn" data-action="close-sheet">Cancel</button>
+        <button type="submit" class="btn primary">Save goal</button>
+      </div>
+      ${g ? `<p style="margin-top:16px;text-align:center"><button type="button" class="link" data-action="delete-goal" data-id="${ex.id}">Remove goal</button></p>` : ''}
+      <p class="error-text" data-error hidden></p>
+    </form>`);
+  }
+
+  // ----- Weekly habit -----
+  function openWeeklySheet() {
+    const m = me();
+    const current = m.weekly_goal || 3;
+    openSheet(`<form data-form="weekly" novalidate>
+      <h2>Weekly goal</h2>
+      <p class="muted" style="margin:-8px 0 18px">How many days a week do you want to be active? Logging any exercise counts for that day.</p>
+      <fieldset><span class="legend">Days per week</span><div class="choice days">
+        ${[1, 2, 3, 4, 5, 6, 7].map((n) => `<label><input type="radio" name="days" value="${n}" ${n === current ? 'checked' : ''}><span>${n}</span></label>`).join('')}
+      </div></fieldset>
+      <div class="btn-row" style="margin-top:8px">
+        <button type="button" class="btn" data-action="close-sheet">Cancel</button>
+        <button type="submit" class="btn primary">Save goal</button>
+      </div>
+      ${m.weekly_goal ? '<p style="margin-top:16px;text-align:center"><button type="button" class="link" data-action="delete-weekly">Remove weekly goal</button></p>' : ''}
+      <p class="error-text" data-error hidden></p>
+    </form>`);
   }
 
   // =====================================================================
@@ -893,13 +1201,32 @@
     else toast(msg);
   }
   async function withBusy(form, fn) {
-    const btn = form.querySelector('[type=submit]');
+    const btns = $$('[type=submit]', form);
     const err = form.querySelector('[data-error]');
     if (err) err.hidden = true;
-    if (btn) btn.disabled = true;
+    btns.forEach((b) => { b.disabled = true; });
     try { await fn(); }
     catch (e) { showFormError(form, e.message); }
-    finally { if (btn && btn.isConnected) btn.disabled = false; }
+    finally { btns.forEach((b) => { if (b.isConnected) b.disabled = false; }); }
+  }
+
+  // Remember which submit button was pressed (for older browsers without e.submitter)
+  let lastSubmitValue = null;
+  document.addEventListener('click', (e) => {
+    const b = e.target.closest('button[type=submit]');
+    lastSubmitValue = b ? b.value : null;
+  }, true);
+
+  function progressSnapshot(ex) {
+    const g = goalFor(ex.id);
+    const m = me();
+    const st = statsFor(ex, entriesFor(ex.id));
+    return {
+      goalKind: g ? g.kind : null,
+      goalReached: g ? goalProgress(ex, g).reached : false,
+      weekMet: m.weekly_goal ? weekInfo(m.id).count >= m.weekly_goal : false,
+      best: st ? st.best.value : null,
+    };
   }
 
   async function onSubmit(e) {
@@ -963,31 +1290,56 @@
 
     if (kind === 'log') {
       const ex = exerciseById(form.dataset.ex);
-      let value;
+      const rest = ((e.submitter && e.submitter.value) || lastSubmitValue) === 'rest';
+      if (rest) unlockAudio(); // must happen during the tap for sound to work later
+      let value, usedStopwatch = false;
       if (ex.unit_type === 'duration') {
-        const mins = Number(fld(form, 'min').value || 0), secs = Number(fld(form, 'sec').value || 0);
-        value = Math.round(mins * 60 + secs);
-        if (!(value > 0)) return showFormError(form, 'Enter a time, or use the stopwatch below.');
-        if (secs >= 60) return showFormError(form, 'Seconds should be 0 to 59.');
+        const mi = fld(form, 'min'), se = fld(form, 'sec');
+        const typed = mi.dataset.auto !== '1' && (mi.value !== '' || se.value !== '');
+        if (!typed && swMs() >= 1000) {
+          value = Math.round(swMs() / 1000);
+          usedStopwatch = true;
+        } else {
+          const secs = Number(se.value || 0);
+          if (secs >= 60) return showFormError(form, 'Seconds should be 0 to 59.');
+          value = Math.round(Number(mi.value || 0) * 60 + secs);
+        }
+        if (!(value > 0)) return showFormError(form, 'Start the stopwatch, or type a time.');
       } else {
-        if (fld(form, 'value').value === '') return showFormError(form, 'Enter a number.');
-        value = Number(fld(form, 'value').value);
+        const raw = fld(form, 'value').value;
+        if (raw === '') return showFormError(form, 'Enter a number.');
+        value = Number(raw);
         if (!Number.isFinite(value) || value < 0) return showFormError(form, 'Enter a number of 0 or more.');
       }
       const date = fld(form, 'date').value || todayISO();
       if (date > todayISO()) return showFormError(form, 'The date can’t be in the future.');
-      const prev = entriesFor(ex.id);
-      const prevBest = statsFor(ex, prev);
+
+      const before = progressSnapshot(ex);
       await withBusy(form, async () => {
         await rpc('add_entry', {
           p_code: state.code, p_member_id: state.meId, p_exercise_id: ex.id,
           p_value: value, p_date: date, p_note: fld(form, 'note').value.trim() || null,
         });
-        if (ex.unit_type === 'duration') { sw.running = false; sw.base = 0; }
+        if (usedStopwatch || ex.unit_type === 'duration') { sw.running = false; sw.base = 0; }
+        if (rest) { cd.base = 0; cd.done = false; cd.t0 = Date.now(); cd.running = true; }
         await loadFamily();
         render();
-        if (prevBest && isBetter(ex, value, prevBest.best.value)) toast('New personal best!', true);
-        else toast('Entry saved');
+
+        const after = progressSnapshot(ex);
+        const g = goalFor(ex.id);
+        if (!before.goalReached && after.goalReached) {
+          toast(g.kind === 'monthly' ? 'Monthly goal reached!' : `Goal reached: ${fmtValue(ex, g.target_value)}!`, true);
+        } else if (before.best !== null && isBetter(ex, value, before.best)) {
+          toast('New personal best!', true);
+        } else if (!before.weekMet && after.weekMet) {
+          toast(`Weekly goal met: ${plural(me().weekly_goal, 'day', 'days')}!`, true);
+        } else {
+          toast(rest ? 'Saved. Rest started.' : 'Entry saved');
+        }
+        if (rest) {
+          const panel = $('#rest-panel');
+          if (panel) panel.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
       });
     }
 
@@ -1018,6 +1370,58 @@
         }
       });
     }
+
+    if (kind === 'goal') {
+      const ex = exerciseById(form.dataset.ex);
+      const fresh = form.dataset.fresh === '1';
+      const existing = fresh ? null : goalFor(ex.id);
+      const checked = form.querySelector('[name=goal_kind]:checked');
+      const goalKind = checked ? checked.value : 'target';
+      const today = todayISO();
+      const st = statsFor(ex, entriesFor(ex.id));
+      let args;
+
+      if (goalKind === 'target') {
+        const target = readValue(ex, form, 'target');
+        if (!(target > 0)) return showFormError(form, 'Enter a target.');
+        const due = fld(form, 'due').value;
+        if (!due || due <= today) return showFormError(form, 'Pick a date after today.');
+        // Keep the original starting point when editing the same goal
+        const keep = existing && existing.kind === 'target';
+        const startValue = keep ? existing.start_value : (st ? st.latest.value : null);
+        if (startValue !== null && !isBetter(ex, target, startValue)) {
+          return showFormError(form, `Pick a target ${ex.higher_is_better ? 'above' : 'below'} ${fmtValue(ex, startValue)}, where you are now.`);
+        }
+        args = {
+          p_kind: 'target', p_target: target, p_start_value: startValue,
+          p_start_date: keep ? existing.start_date : today, p_due_date: due,
+        };
+      } else {
+        const target = readValue(ex, form, 'monthly');
+        if (!(target > 0)) return showFormError(form, 'Enter a monthly total.');
+        args = { p_kind: 'monthly', p_target: target, p_start_value: null, p_start_date: today, p_due_date: null };
+      }
+
+      await withBusy(form, async () => {
+        await rpc('set_goal', { p_code: state.code, p_exercise_id: ex.id, ...args });
+        closeSheet();
+        await loadFamily();
+        render();
+        toast('Goal saved');
+      });
+    }
+
+    if (kind === 'weekly') {
+      const days = Number((form.querySelector('[name=days]:checked') || {}).value || 0);
+      if (!days) return showFormError(form, 'Pick a number of days.');
+      await withBusy(form, async () => {
+        await rpc('set_weekly_goal', { p_code: state.code, p_member_id: state.meId, p_days: days });
+        closeSheet();
+        await loadFamily();
+        render();
+        toast('Weekly goal saved');
+      });
+    }
   }
 
   async function act(fn, okMsg) {
@@ -1045,18 +1449,14 @@
       else { sw.t0 = Date.now(); sw.running = true; }
       return renderTimerSlots();
     }
-    if (a === 'sw-reset') { sw.running = false; sw.base = 0; return renderTimerSlots(); }
-    if (a === 'sw-use') {
-      const secs = Math.round(swMs() / 1000);
-      const form = $('form[data-form="log"]');
-      if (!form) return;
-      if (sw.running) { sw.base = swMs(); sw.running = false; renderTimerSlots(); }
-      fld(form, 'min').value = Math.floor(secs / 60);
-      fld(form, 'sec').value = secs % 60;
-      fld(form, 'min').dataset.dirty = '1';
-      form.scrollIntoView({ behavior: 'smooth', block: 'start' });
-      toast('Time added. Tap Save entry to keep it.');
-      return;
+    if (a === 'sw-reset') {
+      sw.running = false; sw.base = 0;
+      const form = $('form[data-form="log"][data-dur="1"]');
+      if (form && fld(form, 'min').dataset.auto === '1') {
+        fld(form, 'min').value = ''; fld(form, 'sec').value = '';
+        delete fld(form, 'min').dataset.auto;
+      }
+      return renderTimerSlots();
     }
     if (a === 'cd-toggle') {
       unlockAudio();
@@ -1075,8 +1475,7 @@
     }
     if (a === 'cd-adjust') {
       const delta = Number(el.dataset.delta) * 1000;
-      const left = cdLeft();
-      if (left + delta < 5000) return;
+      if (cdLeft() + delta < 5000) return;
       cd.total += delta;
       if (cd.done) { cd.done = false; cd.base = cd.total - delta; } // add time after it finished
       return renderTimerSlots();
@@ -1091,7 +1490,7 @@
     if (a === 'pick-member') { setMe(el.dataset.id); go('home'); return render(); }
     if (a === 'switch-person') { setMe(null); location.hash = ''; return render(); }
     if (a === 'leave') {
-      if (state.data && me() && !confirm('Sign this phone out of the family? Your entries stay saved, and you can rejoin with the code.')) return;
+      if (state.data && me() && !confirm('Sign this phone out of the family? Your entries stay saved, and you can rejoin with the invite link.')) return;
       leaveFamily();
       location.hash = '';
       return render();
@@ -1117,6 +1516,19 @@
       return act(() => rpc('delete_entry', { p_code: state.code, p_entry_id: el.dataset.id }), 'Entry deleted');
     }
 
+    // --- Goals ---
+    if (a === 'goal-sheet') return openGoalSheet(exerciseById(el.dataset.id), el.dataset.fresh === '1');
+    if (a === 'delete-goal') {
+      if (!confirm('Remove this goal? Your entries stay as they are.')) return;
+      closeSheet();
+      return act(() => rpc('delete_goal', { p_code: state.code, p_exercise_id: el.dataset.id }), 'Goal removed');
+    }
+    if (a === 'weekly-sheet') return openWeeklySheet();
+    if (a === 'delete-weekly') {
+      closeSheet();
+      return act(() => rpc('set_weekly_goal', { p_code: state.code, p_member_id: state.meId, p_days: null }), 'Weekly goal removed');
+    }
+
     // --- Invite ---
     if (a === 'share-invite' || a === 'copy-invite') {
       const link = inviteLink();
@@ -1139,15 +1551,26 @@
       sheetState.unit_label = units ? units[0] : '';
       $('#sheet-root .sheet').innerHTML = exerciseSheetHTML();
     }
+    // Show the right fields for the goal type
+    if (e.target.name === 'goal_kind') {
+      $$('#sheet-root [data-kind-block]').forEach((b) => { b.hidden = b.dataset.kindBlock !== e.target.value; });
+    }
   }
 
   document.addEventListener('click', onClick);
   document.addEventListener('submit', onSubmit);
   document.addEventListener('change', onChange);
   document.addEventListener('input', (e) => {
-    if (e.target.matches('#app input, #app textarea') && e.target.type !== 'date') e.target.dataset.dirty = '1';
+    const t = e.target;
+    if (!t.matches('#app input, #app textarea') || t.type === 'date') return;
+    t.dataset.dirty = '1';
+    // Typing your own time takes over from the stopwatch
+    if (t.name === 'min' || t.name === 'sec') {
+      const form = t.form;
+      if (form) delete fld(form, 'min').dataset.auto;
+    }
   });
-  document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && sheetState) closeSheet(); });
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && $('.sheet-overlay')) closeSheet(); });
   window.addEventListener('hashchange', () => { render(); window.scrollTo(0, 0); });
 
   // Refresh when the app comes back to the front (e.g. after switching apps)
