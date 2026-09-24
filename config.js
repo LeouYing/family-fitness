@@ -3,6 +3,6 @@
 // for it to be in this file. Never paste the "secret" or "service_role" key.
 
 window.APP_CONFIG = {
-  SUPABASE_URL: "https://zbdshzcftcbwapzqxdmf.supabase.co/rest/v1/",
+  SUPABASE_URL: "https://zbdshzcftcbwapzqxdmf.supabase.co",
   SUPABASE_KEY: "sb_publishable_ewYLq2WuLMWJcqhcvPig4g_PyOB-H2V",
 };
