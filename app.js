@@ -1,4 +1,4 @@
-/* Family Fitness app (v4)
+/* Family Fitness app (v5)
    Plain JavaScript, no build step. Screens are drawn by the view*() functions,
    clicks are handled in onClick(), forms in onSubmit(). */
 (() => {
@@ -1041,6 +1041,8 @@
         <p class="error-text" data-error hidden></p>
       </form>
 
+      ${notificationsPanel()}
+
       <div class="panel section">
         <h3>Invite family</h3>
         <p class="muted" style="margin-top:6px">Send the link, or have them enter this code.</p>
@@ -1904,6 +1906,183 @@
   }
 
   // =====================================================================
+  // Notifications (Web Push)
+  // =====================================================================
+  const PUSH_TYPES = [
+    ['weekly', 'Weekly goal and streak'],
+    ['goals', 'Exercise goal deadlines'],
+    ['monthly', 'Monthly totals'],
+    ['family', 'Family news (someone reaches a goal)'],
+    ['watch', 'Log yesterday’s watch calories'],
+    ['weight', 'Weekly weigh-in reminder'],
+  ];
+  const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  const isStandalone = () => window.matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
+  let swReg = null;
+
+  function registerServiceWorker() {
+    if (!('serviceWorker' in navigator)) return;
+    navigator.serviceWorker.register('sw.js').then((r) => { swReg = r; }).catch(() => { /* not available */ });
+  }
+  async function readyRegistration() {
+    if (swReg) return swReg;
+    return Promise.race([
+      navigator.serviceWorker.ready,
+      new Promise((_, rej) => setTimeout(() => rej(new Error('Notifications aren’t ready on this phone yet. Reload the app and try again.')), 8000)),
+    ]);
+  }
+  function pushPrefs() {
+    try { return JSON.parse(store.get('ff_push_prefs')) || { hour: 19, types: {} }; } catch { return { hour: 19, types: {} }; }
+  }
+  function urlB64ToBytes(s) {
+    const t = (s + '='.repeat((4 - (s.length % 4)) % 4)).replace(/-/g, '+').replace(/_/g, '/');
+    return Uint8Array.from(atob(t), (c) => c.charCodeAt(0));
+  }
+
+  async function callPushFunction(body) {
+    const url = cfg.SUPABASE_URL.replace(/\/+$/, '') + '/functions/v1/send-reminders';
+    const headers = { 'Content-Type': 'application/json', apikey: cfg.SUPABASE_KEY };
+    if (cfg.SUPABASE_KEY.startsWith('eyJ')) headers.Authorization = 'Bearer ' + cfg.SUPABASE_KEY;
+    let res;
+    try { res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body) }); }
+    catch { throw new Error('Couldn’t reach the notifications service. Check the send-reminders setup in the README (steps N3 and N4).'); }
+    let data = null;
+    try { data = await res.json(); } catch { /* not JSON */ }
+    if (res.ok) return data;
+    if (res.status === 401) throw new Error('Turn off “Verify JWT” for the send-reminders function (README, step N3).');
+    if (res.status === 404 && !(data && data.code && data.code !== 'NOT_FOUND')) throw new Error('The send-reminders function isn’t set up yet (README, step N3).');
+    throw new Error((data && data.error) || 'Something went wrong with notifications.');
+  }
+
+  // Works out what the Notifications section should show on this phone
+  async function loadPushState() {
+    if (!('serviceWorker' in navigator) || !('PushManager' in window) || !('Notification' in window)) {
+      state.push = { status: isIOS && !isStandalone() ? 'ios-home' : 'unsupported' };
+      return;
+    }
+    if (Notification.permission === 'denied') { state.push = { status: 'denied' }; return; }
+    try {
+      const reg = await readyRegistration();
+      const sub = await reg.pushManager.getSubscription();
+      state.push = { status: sub && Notification.permission === 'granted' ? 'on' : 'off', prefs: pushPrefs() };
+      if (state.push.status === 'off' && !state.pushKey) {
+        callPushFunction({ action: 'public-key' }).then((d) => { state.pushKey = d.publicKey; }).catch(() => { /* shown when turning on */ });
+      }
+    } catch (e) {
+      state.push = { status: 'error', message: e.message };
+    }
+  }
+  function ensurePushState() {
+    if (state.push || state.pushLoading) return;
+    state.pushLoading = true;
+    loadPushState().finally(() => { state.pushLoading = false; if (route().name === 'settings') safeRender(); });
+  }
+
+  async function savePushSubscription(sub, prefs) {
+    const j = sub.toJSON();
+    await rpc('push_subscribe', {
+      p_code: state.code, p_member_id: state.meId, p_endpoint: j.endpoint,
+      p_p256dh: j.keys.p256dh, p_auth: j.keys.auth,
+      p_tz: (Intl.DateTimeFormat().resolvedOptions().timeZone) || 'UTC',
+      p_hour: prefs.hour, p_types: prefs.types,
+    });
+    store.set('ff_push_prefs', JSON.stringify(prefs));
+  }
+
+  async function enablePush() {
+    // Ask straight away: phones only allow this right after a tap
+    const permission = await Notification.requestPermission();
+    if (permission !== 'granted') {
+      await loadPushState();
+      render();
+      return toast(permission === 'denied' ? 'Notifications are blocked. You can allow them in your phone’s settings.' : 'Notifications weren’t turned on.');
+    }
+    try {
+      const key = state.pushKey || (await callPushFunction({ action: 'public-key' })).publicKey;
+      const reg = await readyRegistration();
+      const sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: urlB64ToBytes(key) });
+      await savePushSubscription(sub, pushPrefs());
+      await loadPushState();
+      render();
+      toast('Notifications are on. Send a test to check.');
+    } catch (e) {
+      toast(e.message || 'Couldn’t turn on notifications.');
+      await loadPushState();
+      render();
+    }
+  }
+
+  async function disablePush() {
+    try {
+      const reg = await readyRegistration();
+      const sub = await reg.pushManager.getSubscription();
+      if (sub) {
+        const endpoint = sub.endpoint;
+        await sub.unsubscribe();
+        if (state.code) await rpc('push_unsubscribe', { p_code: state.code, p_endpoint: endpoint }).catch(() => {});
+      }
+    } catch { /* already off */ }
+    await loadPushState();
+    render();
+    toast('Notifications are off on this phone.');
+  }
+
+  async function updatePushPrefs(prefs) {
+    try {
+      const reg = await readyRegistration();
+      const sub = await reg.pushManager.getSubscription();
+      if (!sub) return;
+      await savePushSubscription(sub, prefs);
+      state.push.prefs = prefs;
+      toast('Saved');
+    } catch (e) { toast(e.message); }
+  }
+
+  // When a different person uses this phone, their reminders come here instead
+  async function reassignPush() {
+    try {
+      if (!('serviceWorker' in navigator) || !state.meId) return;
+      const reg = await readyRegistration();
+      const sub = await reg.pushManager.getSubscription();
+      if (sub) await savePushSubscription(sub, pushPrefs());
+    } catch { /* not signed up */ }
+  }
+
+  function notificationsPanel() {
+    const p = state.push;
+    let body;
+    if (!p) {
+      ensurePushState();
+      body = '<p class="muted">Checking…</p>';
+    } else if (p.status === 'ios-home') {
+      body = `<p class="muted">On iPhone, notifications work once the app is on your Home Screen. Add it (see below), open it from the Home Screen icon, then come back here.</p>`;
+    } else if (p.status === 'unsupported') {
+      body = '<p class="muted">This browser can’t show notifications. On Android, use Chrome; on iPhone, open the app from your Home Screen.</p>';
+    } else if (p.status === 'denied') {
+      body = '<p class="muted">Notifications are blocked for this app. Allow them in your phone’s settings (Settings, Notifications), then reopen the app.</p>';
+    } else if (p.status === 'error') {
+      body = `<p class="muted">${esc(p.message)}</p>`;
+    } else if (p.status === 'off') {
+      body = `<p class="muted" style="margin-bottom:14px">Get at most one reminder a day, and only when something needs your attention, like a goal deadline or a weekly goal that’s slipping.</p>
+        <button type="button" class="btn primary wide" data-action="push-enable">Turn on notifications</button>`;
+    } else {
+      const prefs = p.prefs || { hour: 19, types: {} };
+      const hours = Array.from({ length: 17 }, (_, i) => i + 6);
+      body = `<label class="field"><span>Remind me around</span>
+          <select class="input" name="push_hour">${hours.map((h) => `<option value="${h}" ${prefs.hour === h ? 'selected' : ''}>${pad(h)}:00</option>`).join('')}</select></label>
+        <fieldset><span class="legend">Remind me about</span>
+          <div class="check-list">${PUSH_TYPES.map(([k, l]) => `<label class="check"><input type="checkbox" name="push_type" value="${k}" ${prefs.types[k] === false ? '' : 'checked'}><span>${l}</span></label>`).join('')}</div>
+        </fieldset>
+        <div class="btn-row">
+          <button type="button" class="btn" data-action="push-test">Send a test</button>
+          <button type="button" class="btn danger" data-action="push-disable">Turn off</button>
+        </div>
+        <p class="hint">These settings are for this phone. At most one notification a day.</p>`;
+    }
+    return `<div class="panel section"><h3 style="margin-bottom:10px">Notifications</h3>${body}</div>`;
+  }
+
+  // =====================================================================
   // Rendering
   // =====================================================================
   function render() {
@@ -2619,11 +2798,16 @@
     if (a === 'retry') { state.error = null; render(); await loadFamily(); return render(); }
 
     // --- People ---
-    if (a === 'pick-member') { setMe(el.dataset.id); go('home'); return render(); }
+    if (a === 'pick-member') { setMe(el.dataset.id); reassignPush(); go('home'); return render(); }
     if (a === 'switch-person') { store.set(pinKey(state.meId), null); setMe(null); location.hash = ''; return render(); }
     if (a === 'leave') {
       if (state.data && me() && !confirm('Sign this phone out of the family? Your entries stay saved, and you can rejoin with the invite link.')) return;
       if (state.data) state.data.members.forEach((m) => store.set(pinKey(m.id), null));
+      try {
+        const sub = swReg && swReg.pushManager ? await swReg.pushManager.getSubscription() : null;
+        if (sub) { await rpc('push_unsubscribe', { p_code: state.code, p_endpoint: sub.endpoint }).catch(() => {}); await sub.unsubscribe(); }
+      } catch { /* no notifications */ }
+      state.push = null;
       leaveFamily();
       location.hash = '';
       return render();
@@ -2735,6 +2919,22 @@
     }
     if (a === 'food-back') { captureFood(); foodSheet.result = null; return redrawFood(); }
 
+    // --- Notifications ---
+    if (a === 'push-enable') return enablePush();
+    if (a === 'push-disable') return disablePush();
+    if (a === 'push-test') {
+      try {
+        const reg = await readyRegistration();
+        const sub = await reg.pushManager.getSubscription();
+        if (!sub) { state.push = null; return render(); }
+        el.disabled = true;
+        await callPushFunction({ action: 'test', code: state.code, endpoint: sub.endpoint });
+        toast('Test sent. It should arrive in a few seconds.');
+      } catch (e) { toast(e.message); }
+      finally { if (el.isConnected) el.disabled = false; }
+      return;
+    }
+
     // --- Invite ---
     if (a === 'share-invite' || a === 'copy-invite') {
       const link = inviteLink();
@@ -2762,6 +2962,11 @@
 
   function onChange(e) {
     if (e.target.name === 'photo' && e.target.type === 'file') return onPhotoChosen(e.target);
+    if ((e.target.name === 'push_hour' || e.target.name === 'push_type') && state.push && state.push.status === 'on') {
+      const types = {};
+      $$('#app [name=push_type]').forEach((c) => { types[c.value] = c.checked; });
+      return updatePushPrefs({ hour: Number(($('#app [name=push_hour]') || {}).value || 19), types });
+    }
     // Redraw the exercise form when the measurement type changes
     if (e.target.name === 'unit_type' && sheetState) {
       captureSheet();
@@ -2815,6 +3020,7 @@
   // Start
   // =====================================================================
   async function start() {
+    registerServiceWorker();
     // Invite links look like  .../?join=K7PM-Q2XD
     const join = new URLSearchParams(location.search).get('join');
     if (join && configured && libsLoaded) {
