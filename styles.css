@@ -345,10 +345,33 @@ p.pace { border-top: 0; padding-top: 0; }
 .input.pin { letter-spacing: 0.3em; font-size: 1.3rem; max-width: 12rem; }
 .field .link { padding-left: 0; }
 
+/* Food logging */
+.segmented.three { grid-template-columns: repeat(3, 1fr); margin-bottom: 16px; }
+.input.textarea { min-height: 96px; resize: vertical; line-height: 1.4; font-size: 1.05rem; }
+.photo-pick {
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px;
+  min-height: 170px; margin-bottom: 14px; border: 2px dashed var(--line); border-radius: var(--radius);
+  background: var(--surface); color: var(--muted); font-weight: 700; cursor: pointer; overflow: hidden; position: relative;
+}
+.photo-pick img { width: 100%; max-height: 260px; object-fit: cover; display: block; }
+.photo-pick:focus-within { outline: 3px solid var(--accent); outline-offset: 2px; }
+.food-thumb { width: 100%; max-height: 180px; object-fit: cover; border-radius: var(--radius-sm); margin-bottom: 12px; }
+.food-items { list-style: none; margin: 0; padding: 0; }
+.food-items li { display: flex; align-items: center; gap: 10px; padding: 10px 0; border-top: 1px solid var(--line); }
+.food-items li:first-child { border-top: 0; }
+.fi-name { flex: 1; min-width: 0; font-weight: 700; overflow-wrap: anywhere; }
+.fi-kcal { display: flex; align-items: center; gap: 6px; flex: none; }
+.fi-kcal .input { width: 5.2rem; min-height: 44px; padding: 6px 8px; text-align: right; font-family: var(--display); font-size: 1.3rem; font-weight: 600; }
+.fi-kcal .unit { color: var(--muted); font-size: 0.85rem; }
+.food-total { display: flex; justify-content: space-between; align-items: baseline; margin-top: 8px; padding-top: 10px; border-top: 2px solid var(--line); font-weight: 700; }
+.food-total strong { font-family: var(--display); font-size: 1.7rem; }
+.sport-line { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line); font-size: 0.95rem; }
+.sport-line + .hint, .goal-bar + .hint { margin-top: 8px; }
+
 /* ---------- Tab bar ---------- */
 .tabs {
   position: fixed; left: 0; right: 0; bottom: 0; z-index: 20;
-  display: grid; grid-template-columns: repeat(4, 1fr);
+  display: grid; grid-template-columns: repeat(3, 1fr);
   background: var(--surface); border-top: 2px solid var(--line);
   padding-bottom: env(safe-area-inset-bottom, 0px);
 }

@@ -1,4 +1,4 @@
-/* Family Fitness app (v3)
+/* Family Fitness app (v4)
    Plain JavaScript, no build step. Screens are drawn by the view*() functions,
    clicks are handled in onClick(), forms in onSubmit(). */
 (() => {
@@ -42,6 +42,40 @@
     { name: 'Walk',          unit_type: 'distance', unit_label: 'km',    higher_is_better: true },
     { name: '5 km run',      unit_type: 'duration', unit_label: '',      higher_is_better: false },
     { name: 'Skipping rope', unit_type: 'reps',     unit_label: 'skips', higher_is_better: true },
+  ];
+
+  // Activities an exercise can count as for sport calories.
+  // met = intensity (kcal per kg per hour), perKm / perRep = kcal per kg.
+  const SPORTS = {
+    walking:    { label: 'Walking',           met: 3.5,  perKm: 0.65 },
+    running:    { label: 'Running',           met: 9.0,  perKm: 1.0 },
+    cycling:    { label: 'Cycling',           met: 7.0,  perKm: 0.35 },
+    swimming:   { label: 'Swimming',          met: 7.0,  perKm: 3.5 },
+    rowing:     { label: 'Rowing',            met: 7.0,  perKm: 0.6 },
+    elliptical: { label: 'Elliptical',        met: 5.0 },
+    strength:   { label: 'Strength / core',   met: 3.8,  perRep: 0.005 },
+    skipping:   { label: 'Skipping rope',     met: 11.0, perRep: 0.0017 },
+    racket:     { label: 'Racket sports',     met: 5.5 },
+    team:       { label: 'Team sports',       met: 7.5 },
+    yoga:       { label: 'Yoga / stretching', met: 2.8 },
+    dancing:    { label: 'Dancing',           met: 5.0 },
+    hiking:     { label: 'Hiking',            met: 6.0,  perKm: 0.8 },
+  };
+  // Guess the activity from the exercise name (first match wins)
+  const SPORT_GUESS = [
+    [/skip|jump.?rope|跳绳/i, 'skipping'],
+    [/plank|push|pull|squat|lunge|sit.?up|crunch|burpee|平板|俯卧撑|引体|深蹲|仰卧|卷腹|弓步/i, 'strength'],
+    [/pickle|tennis|badminton|squash|padel|ping.?pong|匹克|网球|羽毛球|乒乓|壁球/i, 'racket'],
+    [/football|soccer|basket|volley|rugby|hockey|足球|篮球|排球/i, 'team'],
+    [/yoga|stretch|pilates|瑜伽|拉伸|普拉提/i, 'yoga'],
+    [/danc|zumba|跳舞|舞/i, 'dancing'],
+    [/hike|hiking|爬山|徒步|登山/i, 'hiking'],
+    [/swim|游泳/i, 'swimming'],
+    [/row|划船/i, 'rowing'],
+    [/ellip|cross.?train|椭圆/i, 'elliptical'],
+    [/cycl|bike|spin|骑|单车|自行车|动感/i, 'cycling'],
+    [/walk|步行|走路|散步|健走/i, 'walking'],
+    [/run|jog|跑/i, 'running'],
   ];
 
   const RANGES = [['30', 'Month'], ['90', '3 months'], ['365', 'Year'], ['all', 'All']];
@@ -156,6 +190,44 @@
         const r = (Math.random() * 16) | 0;
         return (c === 'x' ? r : (r & 0x3) | 0x8).toString(16);
       }));
+  // ----- Sport calories from exercises -----
+  const isKcalUnit = (ex) => ex.unit_type === 'custom' &&
+    /^(k?cals?|calories?|卡|千卡|大卡|卡路里)$/i.test(String(ex.unit_label || '').trim());
+  function sportOptions(ex) {
+    if (ex.unit_type === 'weight') return [];
+    if (ex.unit_type === 'custom') return ['kcal'];
+    const keys = Object.keys(SPORTS);
+    if (ex.unit_type === 'distance') return keys.filter((k) => SPORTS[k].perKm);
+    if (ex.unit_type === 'reps') return keys.filter((k) => SPORTS[k].perRep);
+    return keys; // time
+  }
+  function guessSport(name, ex) {
+    if (isKcalUnit(ex)) return 'kcal';
+    const opts = sportOptions(ex);
+    for (const [re, k] of SPORT_GUESS) if (re.test(name || '') && opts.includes(k)) return k;
+    return 'none';
+  }
+  // What an exercise actually counts as (null = doesn't count)
+  function sportOf(ex) {
+    const a = ex.sport_activity;
+    if (a === 'none') return null;
+    if (a === 'kcal' || SPORTS[a]) return a;
+    return isKcalUnit(ex) ? 'kcal' : null; // exercises logged in kcal count automatically
+  }
+  function entryKcal(ex, value, kg) {
+    const a = sportOf(ex);
+    if (!a) return 0;
+    if (a === 'kcal') return value;
+    const sp = SPORTS[a];
+    if (ex.unit_type === 'duration') return sp.met * kg * (value / 3600);
+    if (ex.unit_type === 'distance' && sp.perKm) {
+      const km = ex.unit_label === 'mi' ? value * 1.609 : ex.unit_label === 'm' ? value / 1000 : value;
+      return sp.perKm * kg * km;
+    }
+    if (ex.unit_type === 'reps' && sp.perRep) return sp.perRep * kg * value;
+    return 0;
+  }
+
   const sortByDate = (list) => list.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
 
   function setMe(id) {
@@ -644,7 +716,7 @@
     const running = sw.running || cd.running;
     const tab = (key, label) =>
       `<a href="#/${key}" data-tab="${key}" ${active === key ? 'aria-current="page"' : ''}>${ICONS[key]}<span>${label}</span>${key === 'timer' && running ? '<span class="running-dot" aria-hidden="true"></span>' : ''}</a>`;
-    return `<nav class="tabs" aria-label="Main">${tab('home', 'Home')}${tab('body', 'Body')}${tab('timer', 'Timer')}${tab('family', 'Family')}</nav>`;
+    return `<nav class="tabs" aria-label="Main">${tab('home', 'Home')}${tab('body', 'Body')}${tab('family', 'Family')}</nav>`;
   }
 
   function rangeChips() {
@@ -892,7 +964,7 @@
     return `<button type="button" class="back" data-action="back" data-to="${isMine ? 'home' : 'family'}">${ICONS.back} Back</button>
       <h1 class="page-title">${esc(ex.name)}</h1>
       <p class="page-sub">${isMine
-        ? `Better when the number goes ${ex.higher_is_better ? 'up' : 'down'}`
+        ? `Better when the number goes ${ex.higher_is_better ? 'up' : 'down'}${sportOf(ex) ? '. Counts toward sport calories' : ''}`
         : `${esc(owner.name)}’s progress`}</p>
       ${logForm}
       <div class="section">
@@ -951,20 +1023,6 @@
         </section>`;
       }).join('')}
       <div class="section"><a class="btn wide" href="#/settings">Invite family members</a></div>`;
-  }
-
-  // ----- Timer tab -----
-  function viewTimer() {
-    const t = state.timerTab;
-    return `<h1 class="page-title" style="margin-bottom:18px">Timer</h1>
-      <div class="segmented" role="group" aria-label="Timer type">
-        <button type="button" data-action="timer-tab" data-tab="stopwatch" aria-pressed="${t === 'stopwatch'}">Stopwatch</button>
-        <button type="button" data-action="timer-tab" data-tab="countdown" aria-pressed="${t === 'countdown'}">Countdown</button>
-      </div>
-      <div data-timer-slot="${t === 'stopwatch' ? 'sw' : 'cd'}" data-compact="0"></div>
-      <p class="muted small" style="text-align:center;margin-top:26px">${t === 'stopwatch'
-        ? 'To save a time, open a time-based exercise. Its stopwatch fills in the time for you.'
-        : 'Keep this screen open for the sound. Your phone will also vibrate if it can.'}</p>`;
   }
 
   // ----- Settings -----
@@ -1090,48 +1148,73 @@
   const round10 = (v) => Math.round(v / 10) * 10;
   const signed = (v, f) => (v > 0 ? '+' : v < 0 ? '−' : '') + f(Math.abs(v));
 
-  // Learns from real results: compares what you ate with how your weight
-  // actually moved over the last 4 weeks, and blends that with the formula.
-  function calibratedBurn(p, kg) {
-    const formula = restingBurn(p, kg);
+  const kgNow = () => (state.body && latestWeight() ? latestWeight().value : 70);
+  const watchFor = (d) => { const l = state.body.logs.find((x) => x.kind === 'watch' && x.date === d); return l ? l.value : null; };
+
+  // Calories from the exercises you logged on a day
+  function exerciseSport(date, kg) {
+    const items = [];
+    exercisesOf(state.meId).concat(exercisesOf(state.meId, true)).forEach((ex) => {
+      const k = entriesFor(ex.id).filter((e) => e.date === date).reduce((sum, e) => sum + entryKcal(ex, e.value, kg), 0);
+      if (k > 0) items.push({ name: ex.name, kcal: k });
+    });
+    return { items, total: items.reduce((sum, i) => sum + i.kcal, 0) };
+  }
+
+  // What you burned on a day, before any adjustment:
+  // watch total > watch active + resting estimate > resting estimate + sport
+  function rawBurn(d, base, kg) {
+    const p = state.body.profile;
+    const ex = exerciseSport(d, kg);
+    const manual = daySum('sport', d);
+    const w = watchFor(d);
+    if (p.watch_mode === 'total' && w != null) return { burn: w, source: 'watch', ex, manual, watch: w };
+    if (p.watch_mode === 'active' && w != null) return { burn: base + w, source: 'watch', ex, manual, watch: w };
+    return { burn: base + ex.total + manual, source: 'estimate', ex, manual, watch: null };
+  }
+
+  // Learns from real results: over the last 4 weeks, compares what you ate
+  // with how your weight actually moved, and nudges the burn numbers
+  // (estimate or watch) halfway toward what your weight says.
+  function calibration(base, kg) {
     const from = daysAgoISO(28), to = daysAgoISO(1);
     const ws = bLogs('weight').filter((w) => w.date >= from && w.date <= to);
-    if (ws.length < 4 || daysBetween(ws[0].date, ws[ws.length - 1].date) < 14) return { base: formula, adjusted: false };
-    const foodDays = [];
+    if (ws.length < 4 || daysBetween(ws[0].date, ws[ws.length - 1].date) < 14) return { f: 1, adjusted: false };
+    const days = [];
     for (let i = 1; i <= 28; i++) {
       const d = daysAgoISO(i);
-      const f = daySum('food', d);
-      if (f > 0) foodDays.push({ food: f, sport: daySum('sport', d) });
+      const food = daySum('food', d);
+      if (food > 0) days.push({ food, burn: rawBurn(d, base, kg).burn });
     }
-    if (foodDays.length < 10) return { base: formula, adjusted: false };
-    // weight trend in kg per day (least squares)
+    if (days.length < 10) return { f: 1, adjusted: false };
     const xs = ws.map((w) => daysBetween(from, w.date)), ys = ws.map((w) => w.value);
     const mx = xs.reduce((a, b) => a + b, 0) / xs.length, my = ys.reduce((a, b) => a + b, 0) / ys.length;
     let num = 0, den = 0;
     xs.forEach((x, i) => { num += (x - mx) * (ys[i] - my); den += (x - mx) ** 2; });
-    const slope = den ? num / den : 0;
-    const avgIn = foodDays.reduce((a, d) => a + d.food, 0) / foodDays.length;
-    const avgSport = foodDays.reduce((a, d) => a + d.sport, 0) / foodDays.length;
-    const observed = avgIn - avgSport - slope * KCAL_PER_KG;
-    const clamped = Math.min(formula * 1.3, Math.max(formula * 0.7, observed));
-    return { base: (formula + clamped) / 2, adjusted: true };
+    const slope = den ? num / den : 0; // kg per day
+    const avgIn = days.reduce((a, d) => a + d.food, 0) / days.length;
+    const avgBurn = days.reduce((a, d) => a + d.burn, 0) / days.length;
+    const ratio = Math.min(1.3, Math.max(0.7, (avgIn - slope * KCAL_PER_KG) / avgBurn));
+    return { f: (1 + ratio) / 2, adjusted: Math.abs(ratio - 1) > 0.02 };
   }
 
   function energyStats() {
     const p = state.body.profile;
     const kg = smoothWeight();
-    const cal = calibratedBurn(p, kg);
-    const base = cal.base;
+    const base = restingBurn(p, kg);
+    const cal = calibration(base, kg);
+    const burnOf = (d) => { const r = rawBurn(d, base, kg); return { ...r, burn: r.burn * cal.f }; };
     const days = [];
-    let sport14 = 0;
+    let burnSum = 0;
     for (let i = 1; i <= 14; i++) { // full days only (today isn't over yet)
       const d = daysAgoISO(i);
-      const food = daySum('food', d), sport = daySum('sport', d);
-      sport14 += sport;
-      if (food > 0) days.push({ date: d, balance: food - base - sport });
+      const b = burnOf(d);
+      burnSum += b.burn;
+      const food = daySum('food', d);
+      if (food > 0) days.push({ date: d, balance: food - b.burn });
     }
-    const avgBalance = days.length ? days.reduce((s, x) => s + x.balance, 0) / days.length : null;
-    return { kg, base, adjusted: cal.adjusted, sportPerDay: sport14 / 14, foodDays: days.length, enough: days.length >= 3, avgBalance };
+    const avgBalance = days.length ? days.reduce((a, x) => a + x.balance, 0) / days.length : null;
+    return { kg, base: base * cal.f, adjusted: cal.adjusted, burnOf, avgBurn: burnSum / 14, foodDays: days.length, enough: days.length >= 3, avgBalance };
   }
 
   function weightGoalReached() {
@@ -1154,7 +1237,7 @@
     const paceKg = es.enough ? es.kg + (es.avgBalance / KCAL_PER_KG) * ahead : null;
     let need = null;
     if (goal && goal.date > today) {
-      need = es.base + es.sportPerDay + ((goal.kg - es.kg) * KCAL_PER_KG) / daysBetween(today, goal.date);
+      need = es.avgBurn + ((goal.kg - es.kg) * KCAL_PER_KG) / daysBetween(today, goal.date);
     }
     return { es, goal, horizon, paceKg, need, reached: weightGoalReached() };
   }
@@ -1215,7 +1298,7 @@
       const food = daySum('food', d);
       days.push({
         letter: parseISO(d).toLocaleDateString(undefined, { weekday: 'narrow' }),
-        bal: food > 0 ? food - es.base - daySum('sport', d) : null,
+        bal: food > 0 ? food - es.burnOf(d).burn : null,
       });
     }
     const max = Math.max(300, ...days.filter((x) => x.bal !== null).map((x) => Math.abs(x.bal)));
@@ -1241,6 +1324,10 @@
   const shareField = (on) => `<label class="check"><input type="checkbox" name="share" ${on ? 'checked' : ''}>
       <span><strong>Share my weight trend with the family</strong><br>
       <span class="muted small">They see how much it has changed, never your actual weight or what you eat.</span></span></label>`;
+  const watchField = (v) => `<fieldset><span class="legend">Smartwatch</span><div class="choice stack">
+      ${[['', 'No watch: estimate for me'], ['total', 'My watch shows total calories (resting + active)'], ['active', 'My watch shows active calories only']]
+        .map(([k, l]) => `<label><input type="radio" name="watch_mode" value="${k}" ${(v || '') === k ? 'checked' : ''}><span>${l}</span></label>`).join('')}
+    </div><p class="hint">Not sure? If a normal day shows more than about 1,500 kcal, it’s probably the total.</p></fieldset>`;
   const heightInput = (v) => `<label class="field"><span>Height</span><div class="log-value small-inputs">
       <input class="input" name="height" type="text" inputmode="decimal" autocomplete="off" placeholder="170" value="${v ?? ''}"><span class="unit">cm</span></div></label>`;
   const birthInput = (v) => `<label class="field"><span>Year of birth</span>
@@ -1260,7 +1347,11 @@
     else if (pin && !/^[0-9]{4}$/.test(pin)) error = 'The PIN must be exactly 4 digits.';
     return {
       error, pin,
-      data: { height_cm: height, birth_year: by, sex: sexEl && sexEl.value, activity: actEl ? actEl.value : 'low', share_weight: fld(form, 'share').checked },
+      data: {
+        height_cm: height, birth_year: by, sex: sexEl && sexEl.value, activity: actEl ? actEl.value : 'low',
+        share_weight: fld(form, 'share').checked,
+        watch_mode: (form.querySelector('[name=watch_mode]:checked') || {}).value || null,
+      },
     };
   }
 
@@ -1291,6 +1382,7 @@
         ${birthInput(p.birth_year)}
         ${sexField(p.sex)}
         ${activityField(p.activity)}
+        ${watchField(p.watch_mode)}
         ${shareField(p.share_weight)}
         ${p.has_pin ? '' : `<label class="field"><span>PIN <span class="muted small">(optional)</span></span>
           <input class="input pin" name="pin" type="password" inputmode="numeric" maxlength="4" autocomplete="new-password" placeholder="4 digits">
@@ -1316,21 +1408,31 @@
     const latest = latestWeight();
     const today = todayISO();
     const eaten = daySum('food', today);
-    const sportToday = daySum('sport', today);
-    const burn = es.base + sportToday;
+    const tb = es.burnOf(today);
+    const burn = tb.burn;
+    const exToday = tb.ex.total + tb.manual;
+    const uncounted = exercisesOf(m.id).filter((ex) => ex.unit_type !== 'weight' && !sportOf(ex) &&
+      ex.sport_activity !== 'none' && entriesFor(ex.id).some((e) => e.date === today));
+    const burnSub = tb.source === 'watch'
+      ? (p.watch_mode === 'active' ? `est. + ${fmtKcal(tb.watch)} watch` : (Math.round(burn) !== Math.round(tb.watch) ? `watch said ${fmtKcal(tb.watch)}` : 'from watch'))
+      : (exToday ? `est., incl. ${fmtKcal(exToday)} sport` : 'estimate');
     const age = ageOf(p);
     const adult = age === null || age >= 18;
     const bmi = bmiOf(p, latest.value);
 
     const week7 = [];
-    for (let i = 1; i <= 7; i++) { const d = daysAgoISO(i); const f = daySum('food', d); if (f > 0) week7.push(f - es.base - daySum('sport', d)); }
+    for (let i = 1; i <= 7; i++) { const d = daysAgoISO(i); const f = daySum('food', d); if (f > 0) week7.push(f - es.burnOf(d).burn); }
     const avg7 = week7.length ? week7.reduce((s, x) => s + x, 0) / week7.length : null;
     const monday = isoFromDate(mondayOf(new Date()));
-    const sportWeek = bLogs('sport').filter((l) => l.date >= monday).reduce((s, l) => s + l.value, 0);
+    let sportWeek = 0;
+    for (let d = parseISO(monday); isoFromDate(d) <= today; d = addDays(d, 1)) {
+      const iso = isoFromDate(d);
+      sportWeek += daySum('sport', iso) + exerciseSport(iso, es.kg).total;
+    }
 
     const recentAll = state.body.logs.filter((l) => l.date >= daysAgoISO(13)).slice().reverse();
     const recent = state.bodyShowAll ? recentAll : recentAll.slice(0, 10);
-    const kindName = { weight: 'Weight', food: 'Food', sport: 'Sport' };
+    const kindName = { weight: 'Weight', food: 'Food', sport: 'Sport', watch: 'Watch' };
 
     return `<header class="top">
         <div><p class="kicker">${p.share_weight ? 'Weight trend shared with family' : 'Private to you'}${p.has_pin ? ', locked with PIN' : ''}</p><h1>Body</h1></div>
@@ -1338,17 +1440,22 @@
       <div class="log-buttons">
         <button type="button" class="btn primary" data-action="body-log" data-kind="weight">+ Weight</button>
         <button type="button" class="btn primary" data-action="body-log" data-kind="food">+ Food</button>
-        <button type="button" class="btn primary" data-action="body-log" data-kind="sport">+ Sport</button>
+        ${p.watch_mode
+          ? '<button type="button" class="btn primary" data-action="body-log" data-kind="watch">+ Watch</button>'
+          : '<button type="button" class="btn primary" data-action="body-log" data-kind="sport">+ Sport</button>'}
       </div>
 
       <div class="panel section">
         <h3>Today</h3>
         <div class="energy-row">
           <div class="en"><span class="label">Eaten</span><span class="value">${fmtKcal(eaten)}</span><span class="sub">${p.kcal_target ? `of ${fmtKcal(p.kcal_target)} kcal` : 'kcal'}</span></div>
-          <div class="en"><span class="label">Burned (est.)</span><span class="value">${fmtKcal(burn)}</span><span class="sub">${sportToday ? `incl. ${fmtKcal(sportToday)} sport` : 'kcal'}</span></div>
+          <div class="en"><span class="label">Burned</span><span class="value">${fmtKcal(burn)}</span><span class="sub">${burnSub}</span></div>
           <div class="en"><span class="label">Balance</span><span class="value">${eaten ? esc(signed(eaten - burn, fmtKcal)) : '–'}</span><span class="sub">${eaten ? 'kcal' : 'log food first'}</span></div>
         </div>
         ${p.kcal_target ? `<div class="goal-bar ${eaten > p.kcal_target ? 'over' : ''}" style="margin-top:12px"><i style="width:${Math.min(100, Math.round((eaten / p.kcal_target) * 100))}%"></i></div>` : ''}
+        ${exToday ? `<p class="sport-line"><strong>Sport today:</strong> ${[...tb.ex.items.map((i) => `${esc(i.name)} ${fmtKcal(i.kcal)}`), ...(tb.manual ? [`logged ${fmtKcal(tb.manual)}`] : [])].join(', ')} kcal${tb.source === 'watch' ? ' <span class="muted">(already in your watch number)</span>' : ''}</p>` : ''}
+        ${uncounted.length ? `<p class="hint">${uncounted.map((ex) => esc(ex.name)).join(', ')} ${uncounted.length === 1 ? 'isn’t' : 'aren’t'} counting toward sport calories. Choose an activity in <em>Edit exercise</em> to include ${uncounted.length === 1 ? 'it' : 'them'}.</p>` : ''}
+        ${p.watch_mode && tb.source !== 'watch' ? '<p class="hint">Using an estimate until you log today’s watch number (best done tomorrow morning).</p>' : ''}
       </div>
 
       <div class="section">
@@ -1467,6 +1574,8 @@
     const last = latestWeight();
     const existing = kind === 'weight' ? bLogs('weight').find((l) => l.date === today) : null;
     const title = { weight: 'Log weight', food: 'Log food', sport: 'Log sport' }[kind];
+    if (kind === 'food') return openFoodSheet();
+    if (kind === 'watch') return openWatchSheet();
     openSheet(`<form data-form="body-log" data-kind="${kind}" novalidate>
       <h2>${title}</h2>
       <div class="log-value">
@@ -1476,7 +1585,7 @@
       ${kind === 'food' ? `<div class="chips" style="margin:14px 0 2px">${['Breakfast', 'Lunch', 'Dinner', 'Snack'].map((l) => `<button type="button" class="chip" data-action="set-label" data-label="${l}" aria-pressed="false">${l}</button>`).join('')}</div>` : ''}
       ${kind !== 'weight' ? `<label class="field" style="margin-top:12px"><span class="small">${kind === 'food' ? 'What was it? (optional)' : 'What did you do? (optional)'}</span>
         <input class="input" name="label" maxlength="120" placeholder="${kind === 'food' ? 'e.g. rice, beans and salad' : 'e.g. 45 min cycling'}"></label>` : ''}
-      ${kind === 'sport' ? '<p class="hint" style="margin:-8px 0 12px">Watches and fitness apps usually show calories burned.</p>' : ''}
+      ${kind === 'sport' ? '<p class="hint" style="margin:-8px 0 12px">For sport you don’t track as an exercise. Exercises set to count toward sport calories are added automatically.</p>' : ''}
       <label class="field" style="margin-top:12px"><span class="small">Date</span><input class="input" name="date" type="date" value="${today}" max="${today}"></label>
       ${existing ? `<p class="hint" style="margin:-6px 0 12px">Replaces today’s ${fmtKg(existing.value)}.</p>` : ''}
       <div class="btn-row" style="margin-top:8px">
@@ -1503,7 +1612,7 @@
       </div>
       <label class="field"><span>By</span><input class="input" name="goal_date" type="date" value="${due}" min="${isoFromDate(addDays(new Date(), 1))}"></label>
       <div class="field"><span class="legend">Daily food target <span class="muted small">(optional)</span></span>
-        <div class="log-value small-inputs"><input class="input" name="kcal_target" type="text" inputmode="numeric" autocomplete="off" placeholder="${round10(es.base)}" value="${p.kcal_target ?? ''}"><span class="unit">kcal</span></div>
+        <div class="log-value small-inputs"><input class="input" name="kcal_target" type="text" inputmode="numeric" autocomplete="off" placeholder="${round10(es.avgBurn)}" value="${p.kcal_target ?? ''}"><span class="unit">kcal</span></div>
         <p class="hint" data-suggest></p>
       </div>
       <div class="field"><span class="legend">Weekly sport target <span class="muted small">(optional)</span></span>
@@ -1528,9 +1637,9 @@
     const es = energyStats();
     const kg = parseNum(fld(form, 'goal_weight').value);
     const date = fld(form, 'goal_date').value;
-    let html = `Your body burns about ${fmtKcal(round10(es.base))} kcal a day, plus sport.`;
+    let html = `You burn about ${fmtKcal(round10(es.avgBurn))} kcal a day on average, including sport.`;
     if (kg >= 20 && kg <= 400 && date > todayISO()) {
-      const need = round10(es.base + es.sportPerDay + ((kg - es.kg) * KCAL_PER_KG) / daysBetween(todayISO(), date));
+      const need = round10(es.avgBurn + ((kg - es.kg) * KCAL_PER_KG) / daysBetween(todayISO(), date));
       html = need < kcalFloor(p)
         ? `Reaching ${fmtKg(kg)} by then would mean eating under ${fmtKcal(kcalFloor(p))} kcal a day, which isn’t recommended. Try a later date.`
         : `For this goal: about ${fmtKcal(need)} kcal a day. <button type="button" class="link" data-action="use-suggested" data-value="${need}">Use this</button>`;
@@ -1545,6 +1654,7 @@
       <div class="grid2">${heightInput(p.height_cm)}${birthInput(p.birth_year)}</div>
       ${sexField(p.sex)}
       ${activityField(p.activity)}
+      ${watchField(p.watch_mode)}
       ${shareField(p.share_weight)}
       <div class="field"><span class="legend">PIN</span>
         ${p.has_pin ? '<p class="hint" style="margin:0 0 8px">This page is locked with a PIN. Type a new one to change it.</p>' : '<p class="hint" style="margin:0 0 8px">With a PIN, only you can open this page, even if someone else taps your name.</p>'}
@@ -1559,11 +1669,214 @@
     </form>`);
   }
 
+  // ----- Food: describe, photo or manual -----
+  let foodSheet = null; // { tab, meal, date, text, note, image, result, kcal, label }
+  const MEALS = ['Breakfast', 'Lunch', 'Dinner', 'Snack'];
+  const CAMERA_ICON = '<svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 8h3l2-2.5h6L17 8h3v11H4z"/><circle cx="12" cy="13.5" r="3.5"/></svg>';
+
+  function openFoodSheet() {
+    foodSheet = { tab: 'describe', meal: null, date: todayISO(), text: '', note: '', image: null, result: null, kcal: '', label: '' };
+    openSheet(`<div data-food>${foodSheetHTML()}</div>`);
+  }
+  function redrawFood() {
+    const box = $('#sheet-root [data-food]');
+    if (box) box.innerHTML = foodSheetHTML();
+  }
+  // Keep what's typed when switching tabs or views
+  function captureFood() {
+    const f = $('#sheet-root [data-food] form');
+    if (!f || !foodSheet) return;
+    const v = (n) => (fld(f, n) ? fld(f, n).value : undefined);
+    if (v('text') !== undefined) foodSheet.text = v('text');
+    if (v('note') !== undefined) foodSheet.note = v('note');
+    if (v('kcal') !== undefined) foodSheet.kcal = v('kcal');
+    if (v('label') !== undefined) foodSheet.label = v('label');
+    if (v('date') !== undefined) foodSheet.date = v('date') || todayISO();
+    if (foodSheet.result) {
+      $$('[data-item]', f).forEach((inp) => { const it = foodSheet.result.items[Number(inp.dataset.item)]; if (it) it.kcal = parseNum(inp.value) || 0; });
+    }
+  }
+
+  // Recent meals you typed yourself, for one-tap logging
+  function recentFoods() {
+    const seen = new Set(), out = [];
+    bLogs('food').slice().reverse().forEach((l) => {
+      if (!l.label || out.length >= 6) return;
+      const key = l.label.replace(/^(Breakfast|Lunch|Dinner|Snack): /, '').toLowerCase();
+      if (seen.has(key)) return;
+      seen.add(key);
+      out.push({ label: l.label.replace(/^(Breakfast|Lunch|Dinner|Snack): /, ''), kcal: l.value });
+    });
+    return out;
+  }
+
+  function foodSheetHTML() {
+    const f = foodSheet;
+    const today = todayISO();
+    const common = `
+      <p class="small muted" style="margin:16px 0 6px">Meal</p>
+      <div class="chips">${MEALS.map((l) => `<button type="button" class="chip" data-action="food-meal" data-label="${l}" aria-pressed="${f.meal === l}">${l}</button>`).join('')}</div>
+      <label class="field" style="margin-top:12px"><span class="small">Date</span><input class="input" name="date" type="date" value="${f.date}" max="${today}"></label>`;
+
+    if (f.result) {
+      const items = f.result.items;
+      const total = items.reduce((a, i) => a + (Number(i.kcal) || 0), 0);
+      const conf = { high: 'Good estimate.', medium: 'Estimate: check the portions look right.', low: 'Rough estimate: adjust the numbers if you know better.' }[f.result.confidence] || '';
+      return `<form data-form="food-save" novalidate>
+        <h2>Estimate</h2>
+        ${f.image ? `<img class="food-thumb" src="${f.image.preview}" alt="Your meal">` : ''}
+        ${f.resultText ? `<p class="muted" style="margin-bottom:10px">“${esc(f.resultText)}”</p>` : ''}
+        <ul class="food-items">
+          ${items.map((it, i) => `<li>
+            <span class="fi-name">${esc(it.name)}${it.portion ? `<br><span class="muted small">${esc(it.portion)}</span>` : ''}</span>
+            <span class="fi-kcal"><input class="input" data-item="${i}" type="text" inputmode="numeric" autocomplete="off" value="${Math.round(it.kcal)}" aria-label="Calories for ${esc(it.name)}"><span class="unit">kcal</span></span>
+            <button type="button" class="icon-btn" data-action="food-remove" data-i="${i}" aria-label="Remove ${esc(it.name)}">${ICONS.trash}</button>
+          </li>`).join('')}
+        </ul>
+        <p class="food-total"><span>Total</span><span><strong data-food-total>${fmtKcal(total)}</strong> kcal</span></p>
+        <p class="hint">${conf}${f.result.note ? ` ${esc(f.result.note)}` : ''}</p>
+        ${common}
+        <div class="btn-row" style="margin-top:8px">
+          <button type="button" class="btn" data-action="food-back">Back</button>
+          <button type="submit" class="btn primary">Save</button>
+        </div>
+        <p class="error-text" data-error hidden></p>
+      </form>`;
+    }
+
+    const tabBtn = (k, l) => `<button type="button" data-action="food-tab" data-tab="${k}" aria-pressed="${f.tab === k}">${l}</button>`;
+    let body = '';
+    if (f.tab === 'describe') {
+      body = `<label class="field"><span class="visually-hidden">What did you eat?</span>
+          <textarea class="input textarea" name="text" rows="3" maxlength="1000" placeholder="What did you eat? e.g. two eggs, toast with butter and a coffee with milk">${esc(f.text)}</textarea></label>
+        <p class="hint" style="margin-top:-8px">Tip: tap the microphone on your keyboard to say it instead of typing. Amounts help, like “a big bowl” or “half a plate”.</p>`;
+    } else if (f.tab === 'photo') {
+      body = `<label class="photo-pick">
+          ${f.image ? `<img src="${f.image.preview}" alt="Your meal">` : `${CAMERA_ICON}<span>Take or choose a photo</span>`}
+          <input class="visually-hidden" type="file" name="photo" accept="image/*">
+        </label>
+        ${f.image ? '<p class="hint" style="text-align:center;margin:-6px 0 10px">Tap the photo to change it.</p>' : ''}
+        <label class="field"><span class="small">Anything the photo doesn’t show? (optional)</span>
+          <input class="input" name="note" maxlength="300" value="${esc(f.note)}" placeholder="e.g. half portion, fried in oil, sweet tea"></label>`;
+    } else {
+      const recent = recentFoods();
+      body = `<div class="log-value">
+          <input class="input" name="kcal" type="text" inputmode="decimal" autocomplete="off" placeholder="0" value="${esc(f.kcal)}" aria-label="Calories">
+          <span class="unit">kcal</span></div>
+        <label class="field" style="margin-top:12px"><span class="small">What was it? (optional)</span>
+          <input class="input" name="label" maxlength="120" value="${esc(f.label)}" placeholder="e.g. rice, beans and salad"></label>
+        ${recent.length ? `<p class="small muted" style="margin-bottom:6px">Recent</p><div class="chips">${recent.map((r, i) => `<button type="button" class="chip" data-action="food-recent" data-i="${i}">${esc(r.label.length > 26 ? r.label.slice(0, 25) + '…' : r.label)} (${fmtKcal(r.kcal)})</button>`).join('')}</div>` : ''}`;
+    }
+    return `<form data-form="food" novalidate>
+      <h2>Log food</h2>
+      <div class="segmented three" role="group" aria-label="How to log">${tabBtn('describe', 'Describe')}${tabBtn('photo', 'Photo')}${tabBtn('manual', 'Manual')}</div>
+      ${body}
+      ${common}
+      <div class="btn-row" style="margin-top:8px">
+        <button type="button" class="btn" data-action="close-sheet">Cancel</button>
+        <button type="submit" class="btn primary">${f.tab === 'manual' ? 'Save' : 'Estimate'}</button>
+      </div>
+      <p class="error-text" data-error hidden></p>
+    </form>`;
+  }
+
+  function updateFoodTotal() {
+    const el = $('#sheet-root [data-food-total]');
+    if (!el) return;
+    const total = $$('#sheet-root [data-item]').reduce((a, inp) => a + (parseNum(inp.value) || 0), 0);
+    el.textContent = fmtKcal(total);
+  }
+
+  // Shrink the photo before sending (faster, cheaper, same accuracy)
+  async function readPhoto(file) {
+    const url = URL.createObjectURL(file);
+    try {
+      const img = await new Promise((resolve, reject) => {
+        const i = new Image();
+        i.onload = () => resolve(i);
+        i.onerror = reject;
+        i.src = url;
+      });
+      const scale = Math.min(1, 1280 / Math.max(img.naturalWidth, img.naturalHeight));
+      const c = document.createElement('canvas');
+      c.width = Math.round(img.naturalWidth * scale);
+      c.height = Math.round(img.naturalHeight * scale);
+      c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+      const dataUrl = c.toDataURL('image/jpeg', 0.82);
+      return { media_type: 'image/jpeg', data: dataUrl.split(',')[1], preview: dataUrl };
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+  }
+
+  // Calls the estimate-food function in your Supabase
+  async function estimateFood(text, image) {
+    const url = cfg.SUPABASE_URL.replace(/\/+$/, '') + '/functions/v1/estimate-food';
+    const headers = { 'Content-Type': 'application/json', apikey: cfg.SUPABASE_KEY };
+    if (cfg.SUPABASE_KEY.startsWith('eyJ')) headers.Authorization = 'Bearer ' + cfg.SUPABASE_KEY; // older "anon" keys
+    let res;
+    try {
+      res = await Promise.race([
+        fetch(url, {
+          method: 'POST', headers,
+          body: JSON.stringify({
+            code: state.code, member_id: state.meId, pin: bodyPin(), text,
+            image: image ? { media_type: image.media_type, data: image.data } : null,
+          }),
+        }),
+        new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 60000)),
+      ]);
+    } catch {
+      throw new Error('Couldn’t reach the AI estimate. Check your connection. If it keeps happening, check the estimate-food setup in the README.');
+    }
+    let data = null;
+    try { data = await res.json(); } catch { /* not JSON */ }
+    if (res.ok) return data;
+    const code = String((data && (data.code || data.error || data.message)) || '');
+    if (res.status === 404) throw new Error('AI estimates aren’t set up yet (README, part “AI food estimates”). You can use Manual for now.');
+    if (res.status === 401) throw new Error('The estimate-food function is refusing the app. Turn off “Verify JWT” for it (README, step A4).');
+    if (code.includes('AI_LIMIT')) throw new Error('You’ve reached today’s limit of AI estimates. Use Manual, or try again tomorrow.');
+    if (code.includes('NO_KEY')) throw new Error('The Claude API key isn’t set in Supabase yet (README, step A2).');
+    if (/PIN_/.test(code)) throw new Error('Your PIN needs re-entering. Reopen the Body tab and try again.');
+    throw new Error((data && data.error) || 'The estimate didn’t work. Try again.');
+  }
+
+  function mealLabel(text) {
+    const m = foodSheet.meal;
+    if (m && text) return `${m}: ${text}`.slice(0, 120);
+    return (m || text || '').slice(0, 120) || null;
+  }
+
+  // ----- Watch calories -----
+  function openWatchSheet() {
+    const p = state.body.profile;
+    const yest = daysAgoISO(1);
+    const date = bLogs('watch').some((l) => l.date === yest) ? todayISO() : yest;
+    const existing = bLogs('watch').find((l) => l.date === date);
+    openSheet(`<form data-form="body-log" data-kind="watch" novalidate>
+      <h2>Log watch calories</h2>
+      <p class="muted" style="margin:-8px 0 16px">${p.watch_mode === 'active'
+        ? 'Your watch’s <strong>active</strong> calories for the whole day.'
+        : 'Your watch’s <strong>total</strong> calories burned for the whole day (resting + active).'}</p>
+      <div class="log-value">
+        <input class="input" name="value" type="text" inputmode="decimal" autocomplete="off" placeholder="0" aria-label="Calories">
+        <span class="unit">kcal</span>
+      </div>
+      <label class="field" style="margin-top:12px"><span class="small">Day</span><input class="input" name="date" type="date" value="${date}" max="${todayISO()}"></label>
+      <p class="hint" style="margin:-6px 0 12px">Best logged the next morning, once the day is complete.${existing ? ` Replaces the ${fmtKcal(existing.value)} kcal already logged for that day.` : ''}</p>
+      <div class="btn-row" style="margin-top:8px">
+        <button type="button" class="btn" data-action="close-sheet">Cancel</button>
+        <button type="submit" class="btn primary">Save</button>
+      </div>
+      <p class="error-text" data-error hidden></p>
+    </form>`);
+  }
+
   // Save a body log straight away, then sync in the background
   async function saveBodyLog(kind, value, date, label) {
     const log = { id: newId(), kind, value, date, label };
     const hadReached = kind === 'weight' && weightGoalReached();
-    const replaced = kind === 'weight' ? state.body.logs.filter((l) => l.kind === 'weight' && l.date === date) : [];
+    const replaced = kind === 'weight' || kind === 'watch' ? state.body.logs.filter((l) => l.kind === kind && l.date === date) : [];
     state.body.logs = state.body.logs.filter((l) => !replaced.includes(l));
     state.body.logs.push(log);
     sortByDate(state.body.logs);
@@ -1608,7 +1921,6 @@
     const r = route();
     let html, tab = r.name;
     switch (r.name) {
-      case 'timer': html = viewTimer(); break;
       case 'family': html = viewFamily(); break;
       case 'body': html = viewBody(); break;
       case 'settings': html = viewSettings(); tab = 'home'; break;
@@ -1648,7 +1960,7 @@
     const first = $('#sheet-root input:checked, #sheet-root input, #sheet-root button');
     if (first) setTimeout(() => first.focus(), 50);
   }
-  function closeSheet() { $('#sheet-root').innerHTML = ''; sheetState = null; }
+  function closeSheet() { $('#sheet-root').innerHTML = ''; sheetState = null; foodSheet = null; }
 
   // ----- New / edit exercise -----
   function exerciseSheetHTML() {
@@ -1682,6 +1994,7 @@
         <label><input type="radio" name="dir" value="up" ${s.higher_is_better ? 'checked' : ''}><span>Up</span></label>
         <label><input type="radio" name="dir" value="down" ${!s.higher_is_better ? 'checked' : ''}><span>Down</span></label>
       </div><p class="hint">Pick “down” for things like a run time, where faster is better.</p></fieldset>
+      ${sportFieldHTML(s)}
       <div class="btn-row" style="margin-top:8px">
         <button type="button" class="btn" data-action="close-sheet">Cancel</button>
         <button type="submit" class="btn primary">${editing ? 'Save changes' : 'Create exercise'}</button>
@@ -1692,12 +2005,27 @@
     </form>`;
   }
 
+  function sportFieldHTML(s) {
+    const opts = sportOptions(s);
+    if (!opts.length) {
+      return `<fieldset><span class="legend">Sport calories</span>
+        <p class="hint" style="margin-top:0">Heaviest-weight exercises can’t be turned into calories, so this one doesn’t count toward sport calories.</p></fieldset>`;
+    }
+    return `<fieldset><span class="legend">Counts toward sport calories as</span><div class="choice">
+        ${['none', ...opts].map((k) => `<label><input type="radio" name="sport" value="${k}" ${s.sport === k ? 'checked' : ''}><span>${k === 'none' ? 'Don’t count' : k === 'kcal' ? 'Calories (as logged)' : SPORTS[k].label}</span></label>`).join('')}
+      </div><p class="hint">${s.unit_type === 'custom'
+        ? 'Choose “Calories (as logged)” if you log this in kcal, e.g. from a machine or your watch.'
+        : 'Each time you log this, its estimated calories are added on your Body page.'}</p></fieldset>`;
+  }
+
   function openExerciseSheet(ex, preset) {
     const base = ex || preset || { name: '', unit_type: 'reps', unit_label: 'reps', higher_is_better: true };
     sheetState = {
       id: ex ? ex.id : null,
       name: base.name, unit_type: base.unit_type, unit_label: base.unit_label,
       higher_is_better: base.higher_is_better,
+      sport: ex ? (sportOf(ex) || 'none') : guessSport(base.name, base),
+      sportTouched: !!ex,
     };
     openSheet(exerciseSheetHTML());
   }
@@ -1711,6 +2039,17 @@
     if (dir) sheetState.higher_is_better = dir.value === 'up';
     const ul = f.querySelector('[name=unit_label]:checked') || f.querySelector('input[name=unit_label]:not([type=radio])');
     if (ul) sheetState.unit_label = ul.value;
+    const sp = f.querySelector('[name=sport]:checked');
+    if (sp) sheetState.sport = sp.value;
+  }
+  // Re-guess the sport activity as the name or unit is typed, until the person picks one
+  function refreshSportGuess() {
+    if (!sheetState || sheetState.sportTouched) return;
+    captureSheet();
+    const g = guessSport(sheetState.name, sheetState);
+    sheetState.sport = g;
+    const input = $(`#sheet-root input[name=sport][value="${g}"]`);
+    if (input) input.checked = true;
   }
 
   // ----- Goal for one exercise -----
@@ -1808,7 +2147,7 @@
     if (el) { el.textContent = msg; el.hidden = false; }
     toast(msg); // shown at the top, where the keyboard can't cover it
   }
-  async function withBusy(form, fn) {
+  async function withBusy(form, fn, busyLabel = 'Saving…') {
     const btns = $$('[type=submit]', form);
     const main = btns[btns.length - 1];
     const label = main ? main.textContent : '';
@@ -1816,7 +2155,7 @@
     if (err) err.hidden = true;
     if (document.activeElement) document.activeElement.blur();
     btns.forEach((b) => { b.disabled = true; });
-    if (main) main.textContent = 'Saving…';
+    if (main) main.textContent = busyLabel;
     try { await fn(); }
     catch (e) { showFormError(form, e.message); }
     finally {
@@ -1976,11 +2315,16 @@
       if (!s.name.trim()) return showFormError(form, 'Give the exercise a name.');
       const unit = s.unit_type === 'duration' ? '' : (s.unit_label || '').trim();
       await withBusy(form, async () => {
+        const sportChoice = sportOptions(s).length ? (s.sport || 'none') : null;
         if (s.id) {
           await rpc('update_exercise', {
             p_code: state.code, p_exercise_id: s.id, p_name: s.name.trim(),
             p_unit_label: unit, p_higher_is_better: s.higher_is_better, p_archived: false,
           });
+          const old = exerciseById(s.id);
+          if (sportChoice && sportChoice !== (sportOf(old) || 'none')) {
+            await rpc('set_exercise_sport', { p_code: state.code, p_exercise_id: s.id, p_activity: sportChoice });
+          }
           closeSheet();
           await loadFamily();
           render();
@@ -1990,6 +2334,7 @@
             p_code: state.code, p_member_id: state.meId, p_name: s.name.trim(),
             p_unit_type: s.unit_type, p_unit_label: unit, p_higher_is_better: s.higher_is_better,
           });
+          if (sportChoice) await rpc('set_exercise_sport', { p_code: state.code, p_exercise_id: r.id, p_activity: sportChoice });
           closeSheet();
           await loadFamily();
           go('exercise/' + r.id);
@@ -2088,13 +2433,53 @@
       const k = form.dataset.kind;
       const value = parseNum(fld(form, 'value').value);
       const date = fld(form, 'date').value || todayISO();
+      if (k === 'watch' && !(value > 0 && value <= 10000)) return showFormError(form, 'Enter the calories from your watch, e.g. 2350.');
       if (k === 'weight' ? !(value >= 20 && value <= 400) : !(value > 0 && value <= 10000)) {
         return showFormError(form, k === 'weight' ? 'Enter your weight in kg, e.g. 72.5.' : 'Enter the calories, e.g. 450.');
       }
       if (date > todayISO()) return showFormError(form, 'The date can’t be in the future.');
       const labelEl = fld(form, 'label');
       if (document.activeElement) document.activeElement.blur();
-      await saveBodyLog(k, value, date, labelEl ? labelEl.value.trim() || null : null);
+      const label = k === 'watch'
+        ? (state.body.profile.watch_mode === 'active' ? 'active calories' : 'total burned')
+        : (labelEl ? labelEl.value.trim() || null : null);
+      await saveBodyLog(k, value, date, label);
+    }
+
+    if (kind === 'food') {
+      captureFood();
+      const f = foodSheet;
+      const date = f.date || todayISO();
+      if (date > todayISO()) return showFormError(form, 'The date can’t be in the future.');
+      if (f.tab === 'manual') {
+        const value = parseNum(f.kcal);
+        if (!(value > 0 && value <= 10000)) return showFormError(form, 'Enter the calories, e.g. 450.');
+        if (document.activeElement) document.activeElement.blur();
+        return saveBodyLog('food', value, date, mealLabel(f.label.trim()));
+      }
+      const text = (f.tab === 'describe' ? f.text : f.note).trim();
+      if (f.tab === 'describe' && text.length < 2) return showFormError(form, 'Describe what you ate, or use Photo or Manual.');
+      if (f.tab === 'photo' && !f.image) return showFormError(form, 'Add a photo first.');
+      await withBusy(form, async () => {
+        const r = await estimateFood(text, f.tab === 'photo' ? f.image : null);
+        if (!foodSheet) return; // sheet was closed meanwhile
+        if (!r.items || !r.items.length) throw new Error(r.note || 'That doesn’t look like food. Try describing it.');
+        foodSheet.result = { items: r.items, confidence: r.confidence, note: r.note };
+        foodSheet.resultText = text;
+        redrawFood();
+      }, 'Estimating…');
+      return;
+    }
+
+    if (kind === 'food-save') {
+      captureFood();
+      const f = foodSheet;
+      const items = f.result.items.filter((i) => i.kcal > 0);
+      const total = Math.round(items.reduce((a, i) => a + i.kcal, 0));
+      if (!items.length || !(total > 0 && total <= 10000)) return showFormError(form, 'The total needs to be between 1 and 10,000 kcal.');
+      const date = f.date || todayISO();
+      if (date > todayISO()) return showFormError(form, 'The date can’t be in the future.');
+      return saveBodyLog('food', total, date, mealLabel(items.map((i) => i.name).join(', ')));
     }
 
     if (kind === 'body-goals') {
@@ -2225,7 +2610,6 @@
       if (cd.done) { cd.done = false; cd.base = cd.total - delta; } // add time after it finished
       return renderTimerSlots();
     }
-    if (a === 'timer-tab') { state.timerTab = el.dataset.tab; return render(); }
 
     // --- Navigation / filters ---
     if (a === 'range') { state.range = el.dataset.range; store.set('ff_range', state.range); return render(); }
@@ -2326,6 +2710,28 @@
       }, 'PIN removed');
     }
 
+    // --- Food sheet ---
+    if (a === 'food-tab') { captureFood(); foodSheet.tab = el.dataset.tab; return redrawFood(); }
+    if (a === 'food-meal') {
+      captureFood();
+      foodSheet.meal = foodSheet.meal === el.dataset.label ? null : el.dataset.label;
+      $$('#sheet-root [data-action="food-meal"]').forEach((c) => c.setAttribute('aria-pressed', String(c.dataset.label === foodSheet.meal)));
+      return;
+    }
+    if (a === 'food-recent') {
+      const r = recentFoods()[Number(el.dataset.i)];
+      const f = $('#sheet-root form[data-form="food"]');
+      if (r && f) { fld(f, 'kcal').value = r.kcal; fld(f, 'label').value = r.label; }
+      return;
+    }
+    if (a === 'food-remove') {
+      captureFood();
+      foodSheet.result.items.splice(Number(el.dataset.i), 1);
+      if (!foodSheet.result.items.length) foodSheet.result = null;
+      return redrawFood();
+    }
+    if (a === 'food-back') { captureFood(); foodSheet.result = null; return redrawFood(); }
+
     // --- Invite ---
     if (a === 'share-invite' || a === 'copy-invite') {
       const link = inviteLink();
@@ -2339,15 +2745,31 @@
     }
   }
 
+  async function onPhotoChosen(input) {
+    const file = input.files && input.files[0];
+    if (!file || !foodSheet) return;
+    try {
+      captureFood();
+      foodSheet.image = await readPhoto(file);
+      redrawFood();
+    } catch {
+      toast('Couldn’t read that photo. Try another one.');
+    }
+  }
+
   function onChange(e) {
+    if (e.target.name === 'photo' && e.target.type === 'file') return onPhotoChosen(e.target);
     // Redraw the exercise form when the measurement type changes
     if (e.target.name === 'unit_type' && sheetState) {
       captureSheet();
       sheetState.unit_type = e.target.value;
       const units = UNIT_TYPES[e.target.value].units;
       sheetState.unit_label = units ? units[0] : '';
+      sheetState.sportTouched = false;
+      sheetState.sport = guessSport(sheetState.name, sheetState);
       $('#sheet-root .sheet').innerHTML = exerciseSheetHTML();
     }
+    if (e.target.name === 'sport' && sheetState) { sheetState.sport = e.target.value; sheetState.sportTouched = true; }
     // Show the right fields for the goal type
     if (e.target.name === 'goal_kind') {
       $$('#sheet-root [data-kind-block]').forEach((b) => { b.hidden = b.dataset.kindBlock !== e.target.value; });
@@ -2360,6 +2782,8 @@
   document.addEventListener('input', (e) => {
     const t = e.target;
     if (t.closest && t.closest('#sheet-root form[data-form="body-goals"]')) updateSuggestion();
+    if (t.closest && t.closest('#sheet-root form[data-form="exercise"]') && (t.name === 'name' || t.name === 'unit_label')) refreshSportGuess();
+    if (t.dataset && t.dataset.item !== undefined) updateFoodTotal();
     const er = t.form && t.form.querySelector('[data-error]');
     if (er) er.hidden = true;
     if (!t.matches('#app input, #app textarea') || t.type === 'date') return;
