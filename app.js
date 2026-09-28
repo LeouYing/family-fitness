@@ -1,4 +1,4 @@
-/* Family Fitness app (v5)
+/* Family Fitness app (v6)
    Plain JavaScript, no build step. Screens are drawn by the view*() functions,
    clicks are handled in onClick(), forms in onSubmit(). */
 (() => {
@@ -1676,8 +1676,29 @@
   const MEALS = ['Breakfast', 'Lunch', 'Dinner', 'Snack'];
   const CAMERA_ICON = '<svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 8h3l2-2.5h6L17 8h3v11H4z"/><circle cx="12" cy="13.5" r="3.5"/></svg>';
 
+  // Guess the meal from the time of day (you can change it)
+  function mealForNow() {
+    const d = new Date(), h = d.getHours() + d.getMinutes() / 60;
+    if (h >= 5 && h < 10.5) return 'Breakfast';
+    if (h >= 11 && h < 15) return 'Lunch';
+    if (h >= 17.5 && h < 22) return 'Dinner';
+    return null;
+  }
+
+  // Opening the app from a reminder: #/body/food:Lunch or #/body/watch
+  function openBodyShortcut(id) {
+    history.replaceState(null, '', location.pathname + location.search + '#/body');
+    const [kind, meal] = String(id).split(':');
+    if (kind === 'food') {
+      openFoodSheet();
+      if (MEALS.includes(meal)) { foodSheet.meal = meal; redrawFood(); }
+    } else if (kind === 'watch' && state.body.profile.watch_mode) {
+      openWatchSheet();
+    }
+  }
+
   function openFoodSheet() {
-    foodSheet = { tab: 'describe', meal: null, date: todayISO(), text: '', note: '', image: null, result: null, kcal: '', label: '' };
+    foodSheet = { tab: 'describe', meal: mealForNow(), date: todayISO(), text: '', note: '', image: null, result: null, kcal: '', label: '' };
     openSheet(`<div data-food>${foodSheetHTML()}</div>`);
   }
   function redrawFood() {
@@ -1916,6 +1937,12 @@
     ['watch', 'Log yesterday’s watch calories'],
     ['weight', 'Weekly weigh-in reminder'],
   ];
+  const ROUTINE = [
+    ['morning', 'Morning', 'Get moving and log breakfast', '07:30'],
+    ['lunch', 'Lunch', 'Log lunch', '12:30'],
+    ['evening', 'Evening', 'Log dinner and calories burned', '20:00'],
+  ];
+  const ROUTINE_TIMES = Array.from({ length: 38 }, (_, i) => `${pad(5 + Math.floor(i / 2))}:${i % 2 ? '30' : '00'}`);
   const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
   const isStandalone = () => window.matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
   let swReg = null;
@@ -1932,7 +1959,23 @@
     ]);
   }
   function pushPrefs() {
-    try { return JSON.parse(store.get('ff_push_prefs')) || { hour: 19, types: {} }; } catch { return { hour: 19, types: {} }; }
+    let p = null;
+    try { p = JSON.parse(store.get('ff_push_prefs')); } catch { p = null; }
+    p = p || {};
+    const routine = {};
+    ROUTINE.forEach(([k, , , time]) => { routine[k] = { on: false, time, ...((p.routine || {})[k] || {}) }; });
+    return { hour: typeof p.hour === 'number' ? p.hour : 19, types: p.types || {}, routine };
+  }
+  function readPushForm() {
+    const types = {};
+    $$('#app [name=push_type]').forEach((c) => { types[c.value] = c.checked; });
+    const routine = {};
+    ROUTINE.forEach(([k, , , time]) => {
+      const on = $(`#app [name=routine_on][value=${k}]`);
+      const t = $(`#app [name=routine_time][data-slot=${k}]`);
+      routine[k] = { on: !!(on && on.checked), time: (t && t.value) || time };
+    });
+    return { hour: Number(($('#app [name=push_hour]') || {}).value || 19), types, routine };
   }
   function urlB64ToBytes(s) {
     const t = (s + '='.repeat((4 - (s.length % 4)) % 4)).replace(/-/g, '+').replace(/_/g, '/');
@@ -1984,7 +2027,7 @@
       p_code: state.code, p_member_id: state.meId, p_endpoint: j.endpoint,
       p_p256dh: j.keys.p256dh, p_auth: j.keys.auth,
       p_tz: (Intl.DateTimeFormat().resolvedOptions().timeZone) || 'UTC',
-      p_hour: prefs.hour, p_types: prefs.types,
+      p_hour: prefs.hour, p_types: prefs.types, p_routine: prefs.routine,
     });
     store.set('ff_push_prefs', JSON.stringify(prefs));
   }
@@ -2063,21 +2106,31 @@
     } else if (p.status === 'error') {
       body = `<p class="muted">${esc(p.message)}</p>`;
     } else if (p.status === 'off') {
-      body = `<p class="muted" style="margin-bottom:14px">Get at most one reminder a day, and only when something needs your attention, like a goal deadline or a weekly goal that’s slipping.</p>
+      body = `<p class="muted" style="margin-bottom:14px">Get reminders to log your meals and workouts at times you choose, plus a heads-up when a goal needs attention. Nothing is sent when there’s nothing to do.</p>
         <button type="button" class="btn primary wide" data-action="push-enable">Turn on notifications</button>`;
     } else {
-      const prefs = p.prefs || { hour: 19, types: {} };
+      const prefs = p.prefs || pushPrefs();
       const hours = Array.from({ length: 17 }, (_, i) => i + 6);
-      body = `<label class="field"><span>Remind me around</span>
-          <select class="input" name="push_hour">${hours.map((h) => `<option value="${h}" ${prefs.hour === h ? 'selected' : ''}>${pad(h)}:00</option>`).join('')}</select></label>
-        <fieldset><span class="legend">Remind me about</span>
+      body = `<fieldset><span class="legend">Daily reminders</span>
+          <p class="hint" style="margin:0 0 6px">Skipped when you’ve already logged it.</p>
+          <div class="routine-list">${ROUTINE.map(([k, label, hint]) => `<div class="routine-row">
+            <label class="check"><input type="checkbox" name="routine_on" value="${k}" ${prefs.routine[k].on ? 'checked' : ''}>
+              <span><strong>${label}</strong><br><span class="muted small">${hint}</span></span></label>
+            <select class="input time-select" name="routine_time" data-slot="${k}" aria-label="${label} reminder time">
+              ${ROUTINE_TIMES.map((t) => `<option ${t === prefs.routine[k].time ? 'selected' : ''}>${t}</option>`).join('')}</select>
+          </div>`).join('')}</div>
+        </fieldset>
+        <fieldset><span class="legend">Goal updates</span>
+          <p class="hint" style="margin:0 0 6px">At most once a day, only when a goal needs attention.</p>
+          <label class="field" style="margin-bottom:8px"><span class="small">Around</span>
+            <select class="input" name="push_hour">${hours.map((h) => `<option value="${h}" ${prefs.hour === h ? 'selected' : ''}>${pad(h)}:00</option>`).join('')}</select></label>
           <div class="check-list">${PUSH_TYPES.map(([k, l]) => `<label class="check"><input type="checkbox" name="push_type" value="${k}" ${prefs.types[k] === false ? '' : 'checked'}><span>${l}</span></label>`).join('')}</div>
         </fieldset>
         <div class="btn-row">
           <button type="button" class="btn" data-action="push-test">Send a test</button>
           <button type="button" class="btn danger" data-action="push-disable">Turn off</button>
         </div>
-        <p class="hint">These settings are for this phone. At most one notification a day.</p>`;
+        <p class="hint">These settings are for this phone.</p>`;
     }
     return `<div class="panel section"><h3 style="margin-bottom:10px">Notifications</h3>${body}</div>`;
   }
@@ -2124,6 +2177,7 @@
       if (ex) drawDetailChart(ex, inRange(entriesFor(ex.id)), memberById(ex.member_id).color);
     }
     if (r.name === 'body' && $('#weight-chart')) drawWeightChart(weightPlan());
+    if (r.name === 'body' && r.id && $('.log-buttons')) openBodyShortcut(r.id);
   }
 
   // Don't redraw underneath someone who is halfway through typing
@@ -2962,10 +3016,8 @@
 
   function onChange(e) {
     if (e.target.name === 'photo' && e.target.type === 'file') return onPhotoChosen(e.target);
-    if ((e.target.name === 'push_hour' || e.target.name === 'push_type') && state.push && state.push.status === 'on') {
-      const types = {};
-      $$('#app [name=push_type]').forEach((c) => { types[c.value] = c.checked; });
-      return updatePushPrefs({ hour: Number(($('#app [name=push_hour]') || {}).value || 19), types });
+    if (['push_hour', 'push_type', 'routine_on', 'routine_time'].includes(e.target.name) && state.push && state.push.status === 'on') {
+      return updatePushPrefs(readPushForm());
     }
     // Redraw the exercise form when the measurement type changes
     if (e.target.name === 'unit_type' && sheetState) {
