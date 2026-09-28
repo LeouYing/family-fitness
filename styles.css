@@ -314,10 +314,41 @@ form[data-dur="1"] .timer { margin-bottom: 14px; }
 .help ol { margin: 8px 0 0; padding-left: 1.2em; }
 .help li { margin-bottom: 6px; }
 
+/* ---------- Body page ---------- */
+.log-buttons { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.log-buttons .btn { padding: 0 6px; min-height: 54px; font-size: 1.05rem; }
+.energy-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 10px; }
+.en { display: flex; flex-direction: column; min-width: 0; }
+.en .label { color: var(--muted); font-size: 0.85rem; }
+.en .value { font-family: var(--display); font-size: 1.9rem; font-weight: 600; line-height: 1.1; font-variant-numeric: tabular-nums; }
+.en .sub { color: var(--muted); font-size: 0.8rem; }
+.weight-now { display: flex; flex-direction: column; gap: 2px; margin-bottom: 12px; }
+.wn-value { font-family: var(--display); font-size: 2.8rem; font-weight: 600; line-height: 1; }
+.pace { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line); font-size: 0.95rem; }
+.goal-block .pace:empty { display: none; }
+p.pace { border-top: 0; padding-top: 0; }
+.pace p + p { margin-top: 4px; }
+.chart-legend { display: flex; flex-wrap: wrap; gap: 6px 16px; margin-top: 10px; font-size: 0.85rem; color: var(--muted); }
+.chart-legend i { display: inline-block; width: 22px; height: 0; border-top: 3px solid var(--c); vertical-align: middle; margin-right: 6px; }
+.chart-legend i.dots { border-top-style: dotted; }
+.chart-legend i.dash { border-top-style: dashed; }
+.goal-bar.over i { background: var(--bad); }
+.goal-bar.done i { background: var(--good); }
+.energy-bars { width: 100%; height: auto; display: block; margin: 12px 0 6px; }
+.energy-bars .bar-label { fill: var(--muted); font-size: 12px; font-family: var(--body); }
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.grid2 .field { min-width: 0; }
+.choice.stack { flex-direction: column; }
+.choice.stack label span { width: 100%; }
+.check { display: flex; gap: 12px; align-items: flex-start; margin: 4px 0 18px; cursor: pointer; }
+.check input { width: 22px; height: 22px; margin-top: 2px; accent-color: var(--ink); flex: none; }
+.input.pin { letter-spacing: 0.3em; font-size: 1.3rem; max-width: 12rem; }
+.field .link { padding-left: 0; }
+
 /* ---------- Tab bar ---------- */
 .tabs {
   position: fixed; left: 0; right: 0; bottom: 0; z-index: 20;
-  display: grid; grid-template-columns: repeat(3, 1fr);
+  display: grid; grid-template-columns: repeat(4, 1fr);
   background: var(--surface); border-top: 2px solid var(--line);
   padding-bottom: env(safe-area-inset-bottom, 0px);
 }
@@ -349,7 +380,7 @@ form[data-dur="1"] .timer { margin-bottom: 14px; }
   position: fixed; left: 50%; top: calc(14px + env(safe-area-inset-top, 0px));
   transform: translate(-50%, -20px); opacity: 0; pointer-events: none; z-index: 50;
   background: var(--ink); color: var(--bg); font-weight: 700;
-  padding: 12px 20px; border-radius: 999px; max-width: calc(100vw - 32px); text-align: center;
+  padding: 12px 20px; border-radius: 22px; width: max-content; max-width: min(520px, calc(100vw - 32px)); text-align: center;
   transition: opacity .2s, transform .2s;
 }
 #toast.show { opacity: 1; transform: translate(-50%, 0); }

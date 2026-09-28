@@ -1,4 +1,4 @@
-/* Family Fitness app (v2)
+/* Family Fitness app (v3)
    Plain JavaScript, no build step. Screens are drawn by the view*() functions,
    clicks are handled in onClick(), forms in onSubmit(). */
 (() => {
@@ -60,6 +60,10 @@
     data: null,
     error: null,
     lastLoad: 0,
+    body: null,          // this person's private body page data
+    bodyLocked: false,   // 'required' | 'wrong' when a PIN is needed
+    bodyError: null,
+    bodyLoading: false,
   };
 
   // =====================================================================
@@ -72,22 +76,41 @@
     if (m.includes('NAME_REQUIRED')) return 'Enter a name first.';
     if (m.includes('TOO_MANY_MEMBERS')) return 'This family has reached the 30-member limit.';
     if (m.includes('BAD_VALUE')) return 'Enter a number of 0 or more.';
+    if (m.includes('PIN_REQUIRED') || m.includes('PIN_WRONG')) return 'That PIN isn’t right. Try again.';
+    if (m.includes('BAD_PIN')) return 'The PIN must be exactly 4 digits.';
     if (m.includes('BAD_GOAL')) return 'That goal doesn’t fit this exercise. Check the goal type and date.';
     if (m.includes('Could not find the function') || m.includes('PGRST202'))
       return 'The database needs updating. Run supabase-setup.sql again in Supabase (see README).';
     if (m.includes('Invalid API key') || m.includes('No API key'))
       return 'The key in config.js isn’t accepted. Copy the publishable key again (README step 3).';
-    if (/fetch|network|Load failed/i.test(m)) return 'Couldn’t reach the server. Check your internet connection and try again.';
+    if (/fetch|network|Load failed|timeout/i.test(m)) return 'Couldn’t reach the server. Check your internet connection and try again.';
     return m || 'Something went wrong. Try again.';
   }
 
-  async function rpc(fn, args = {}) {
+  // Calls a database function. Gives up after 15 seconds, and retries
+  // automatically if the connection drops (saves carry their own id, so a
+  // retry can never create a duplicate).
+  async function rpc(fn, args = {}, { retries = 1 } = {}) {
     if (!db) throw new Error('The app isn’t connected to a database yet.');
-    let res;
-    try { res = await db.rpc(fn, args); }
-    catch (e) { throw new Error(friendly(e && e.message)); }
-    if (res.error) throw new Error(friendly(res.error.message || res.error.code));
-    return res.data;
+    for (let attempt = 0; ; attempt++) {
+      let res = null, netErr = null;
+      try {
+        res = await Promise.race([
+          db.rpc(fn, args),
+          new Promise((_, rej) => setTimeout(() => rej(new Error('Network timeout')), 15000)),
+        ]);
+      } catch (e) { netErr = e; }
+      if (!netErr && !res.error) return res.data;
+      const raw = netErr ? String(netErr.message || netErr) : String(res.error.message || res.error.code || '');
+      const isNetwork = !!netErr || /fetch|network|Load failed|timeout/i.test(raw);
+      if (isNetwork && attempt < retries) {
+        await new Promise((r) => setTimeout(r, 1200 * (attempt + 1)));
+        continue;
+      }
+      const err = new Error(friendly(raw));
+      err.raw = raw;
+      throw err;
+    }
   }
 
   async function loadFamily() {
@@ -95,6 +118,7 @@
     try {
       const d = await rpc('get_family', { p_code: state.code });
       d.entries.forEach((e) => { e.value = Number(e.value); });
+      d.shared_weights = (d.shared_weights || []).map((w) => ({ ...w, delta: Number(w.delta) }));
       d.goals = (d.goals || []).map((g) => ({
         ...g,
         target_value: Number(g.target_value),
@@ -124,8 +148,21 @@
   const pad = (n) => String(n).padStart(2, '0');
   // Look up a form field by name (form.name / form.dir would hit built-in properties)
   const fld = (form, n) => form.elements.namedItem(n);
+  // Accepts "2.5" and "2,5" (some phones type a decimal comma)
+  const parseNum = (v) => { const t = String(v ?? '').trim().replace(',', '.'); return t === '' ? NaN : Number(t); };
+  const newId = () => (window.crypto && crypto.randomUUID
+    ? crypto.randomUUID()
+    : 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+        const r = (Math.random() * 16) | 0;
+        return (c === 'x' ? r : (r & 0x3) | 0x8).toString(16);
+      }));
+  const sortByDate = (list) => list.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
 
-  function setMe(id) { state.meId = id; store.set('ff_member', id); }
+  function setMe(id) {
+    state.meId = id;
+    store.set('ff_member', id);
+    state.body = null; state.bodyLocked = false; state.bodyError = null;
+  }
   function leaveFamily() {
     state.code = null; state.data = null; state.error = null;
     store.set('ff_code', null); setMe(null);
@@ -330,6 +367,7 @@
     home: '<svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 10.5 12 3l9 7.5"/><path d="M5 9.5V21h14V9.5"/><path d="M10 21v-6h4v6"/></svg>',
     timer: '<svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="13.5" r="7.5"/><path d="M12 13.5V9.5"/><path d="M10 2.5h4"/><path d="M18.5 6.5l1.5-1.5"/></svg>',
     family: '<svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="8" r="3.2"/><circle cx="17" cy="9.5" r="2.6"/><path d="M2.5 20c0-3.3 2.5-5.8 5.5-5.8s5.5 2.5 5.5 5.8"/><path d="M14.5 15.2c.7-.4 1.6-.7 2.5-.7 2.5 0 4.5 2.1 4.5 4.8"/></svg>',
+    body: '<svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3.5" y="3.5" width="17" height="17" rx="4.5"/><path d="M7.5 10a4.5 4.5 0 0 1 9 0"/><path d="M12 10l1.8-2.2"/></svg>',
     trash: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h16"/><path d="M10 11v6M14 11v6"/><path d="M6 7l1 13h10l1-13"/><path d="M9 7V4h6v3"/></svg>',
     back: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 5l-7 7 7 7"/></svg>',
   };
@@ -606,7 +644,7 @@
     const running = sw.running || cd.running;
     const tab = (key, label) =>
       `<a href="#/${key}" data-tab="${key}" ${active === key ? 'aria-current="page"' : ''}>${ICONS[key]}<span>${label}</span>${key === 'timer' && running ? '<span class="running-dot" aria-hidden="true"></span>' : ''}</a>`;
-    return `<nav class="tabs" aria-label="Main">${tab('home', 'Home')}${tab('timer', 'Timer')}${tab('family', 'Family')}</nav>`;
+    return `<nav class="tabs" aria-label="Main">${tab('home', 'Home')}${tab('body', 'Body')}${tab('timer', 'Timer')}${tab('family', 'Family')}</nav>`;
   }
 
   function rangeChips() {
@@ -811,7 +849,7 @@
                <input class="input" name="sec" type="number" inputmode="numeric" min="0" max="59" step="1" placeholder="0" aria-label="Seconds"><span class="unit">sec</span>
              </div>`
           : `<div class="log-value">
-               <input class="input" name="value" type="number" inputmode="decimal" min="0" step="any" placeholder="0" aria-label="Amount">
+               <input class="input" name="value" type="text" inputmode="decimal" autocomplete="off" placeholder="0" aria-label="Amount">
                ${ex.unit_label ? `<span class="unit">${esc(ex.unit_label)}</span>` : ''}
              </div>`}
         <div class="log-meta">
@@ -880,6 +918,13 @@
       ${rangeChips()}
       ${ordered.map((m) => {
         const exs = exercisesOf(m.id);
+        const shared = state.data.shared_weights.filter((x) => x.member_id === m.id);
+        const weightCard = shared.length ? `<div class="mini">
+            <span class="m-name">Weight trend</span>
+            <span class="m-latest">${shared.length > 1 ? esc(signed(shared[shared.length - 1].delta, (v) => `${v.toLocaleString(undefined, { maximumFractionDigits: 1 })} kg`)) : 'Just started'}</span>
+            <span class="m-change flat">since ${fmtDate(shared[0].date)}</span>
+            ${sparkline(shared.map((x) => ({ date: x.date, value: x.delta })), m.color, 140, 40)}
+          </div>` : '';
         const w = weekInfo(m.id);
         const weekText = m.weekly_goal
           ? `${w.count} of ${m.weekly_goal} days`
@@ -887,7 +932,7 @@
         return `<section class="person" style="--c:${esc(m.color)}">
           <div class="person-head">${avatar(m)}<h2>${esc(m.name)}${m.id === state.meId ? ' <span class="muted small" style="font-family:var(--body);font-weight:400">(you)</span>' : ''}</h2>
             <span class="active">${weekText}<br>this week</span></div>
-          ${exs.length ? `<div class="mini-grid">
+          ${exs.length || weightCard ? `<div class="mini-grid">
             ${exs.map((ex) => {
               const all = entriesFor(ex.id);
               const list = inRange(all);
@@ -901,7 +946,7 @@
                 ${gm ? `<span class="m-goal">${gm.reached ? (gm.kind === 'monthly' ? 'Monthly goal met' : 'Goal reached') : `Goal ${gm.pct}%`}</span>` : ''}
                 ${sparkline(dailyBest(ex, list), m.color, 140, 40)}
               </a>`;
-            }).join('')}
+            }).join('')}${weightCard}
           </div>` : '<p class="muted" style="margin-top:12px">No exercises yet.</p>'}
         </section>`;
       }).join('')}
@@ -981,6 +1026,568 @@
   }
 
   // =====================================================================
+  // Body page: weight and calories, private to each person
+  // =====================================================================
+  const ACTIVITY = {
+    low:    { label: 'Mostly sitting',                factor: 1.2 },
+    some:   { label: 'On my feet part of the day',    factor: 1.375 },
+    active: { label: 'Physically active work or days', factor: 1.55 },
+  };
+  const KCAL_PER_KG = 7700; // rough rule of thumb: ~7,700 kcal is about 1 kg of body weight
+  const pinKey = (id) => 'ff_pin_' + id;
+  const bodyPin = () => store.get(pinKey(state.meId)) || null;
+
+  async function loadBody() {
+    try {
+      const d = await rpc('get_body', { p_code: state.code, p_member_id: state.meId, p_pin: bodyPin() });
+      const num = (v) => (v == null ? null : Number(v));
+      const p = d.profile;
+      if (p) ['height_cm', 'birth_year', 'weight_goal', 'weight_goal_start', 'kcal_target', 'sport_target'].forEach((k) => { p[k] = num(p[k]); });
+      d.logs.forEach((l) => { l.value = Number(l.value); });
+      state.body = { memberId: state.meId, profile: p, logs: d.logs };
+      state.bodyLocked = false;
+      state.bodyError = null;
+    } catch (e) {
+      if (/PIN_REQUIRED|PIN_WRONG/.test(e.raw || '')) {
+        state.body = null;
+        state.bodyLocked = e.raw.includes('PIN_WRONG') ? 'wrong' : 'required';
+        store.set(pinKey(state.meId), null);
+      } else {
+        state.bodyError = e.message;
+      }
+    }
+  }
+  function ensureBody() {
+    if (state.bodyLoading || state.bodyLocked || state.bodyError) return;
+    if (state.body && state.body.memberId === state.meId) return;
+    state.bodyLoading = true;
+    loadBody().finally(() => { state.bodyLoading = false; if (route().name === 'body') safeRender(); });
+  }
+
+  // ----- Calculations -----
+  const bLogs = (kind) => state.body.logs.filter((l) => l.kind === kind);
+  const daySum = (kind, date) => state.body.logs.reduce((s, l) => (l.kind === kind && l.date === date ? s + l.value : s), 0);
+  const latestWeight = () => { const w = bLogs('weight'); return w.length ? w[w.length - 1] : null; };
+  function smoothWeight() {
+    const w = bLogs('weight');
+    if (!w.length) return null;
+    const recent = w.filter((x) => x.date >= daysAgoISO(7));
+    return recent.length >= 2 ? recent.reduce((s, x) => s + x.value, 0) / recent.length : w[w.length - 1].value;
+  }
+  const ageOf = (p) => (p && p.birth_year ? new Date().getFullYear() - p.birth_year : null);
+  // Mifflin-St Jeor resting burn x everyday activity (sport is logged separately)
+  function restingBurn(p, kg) {
+    const age = ageOf(p) ?? 35;
+    const s = p.sex === 'male' ? 5 : p.sex === 'female' ? -161 : -78;
+    return (10 * kg + 6.25 * p.height_cm - 5 * age + s) * ACTIVITY[p.activity || 'low'].factor;
+  }
+  const bmiOf = (p, kg) => kg / Math.pow(p.height_cm / 100, 2);
+  const bmiText = (v) => (v < 18.5 ? 'underweight range' : v < 25 ? 'healthy range' : v < 30 ? 'overweight range' : 'obese range');
+  const healthyRange = (p) => { const h2 = Math.pow(p.height_cm / 100, 2); return [18.5 * h2, 24.9 * h2]; };
+  const kcalFloor = (p) => (p.sex === 'male' ? 1500 : 1200);
+  const fmtKg = (v) => `${Number(v).toLocaleString(undefined, { maximumFractionDigits: 1 })} kg`;
+  const fmtKcal = (v) => Math.round(v).toLocaleString();
+  const round10 = (v) => Math.round(v / 10) * 10;
+  const signed = (v, f) => (v > 0 ? '+' : v < 0 ? '−' : '') + f(Math.abs(v));
+
+  // Learns from real results: compares what you ate with how your weight
+  // actually moved over the last 4 weeks, and blends that with the formula.
+  function calibratedBurn(p, kg) {
+    const formula = restingBurn(p, kg);
+    const from = daysAgoISO(28), to = daysAgoISO(1);
+    const ws = bLogs('weight').filter((w) => w.date >= from && w.date <= to);
+    if (ws.length < 4 || daysBetween(ws[0].date, ws[ws.length - 1].date) < 14) return { base: formula, adjusted: false };
+    const foodDays = [];
+    for (let i = 1; i <= 28; i++) {
+      const d = daysAgoISO(i);
+      const f = daySum('food', d);
+      if (f > 0) foodDays.push({ food: f, sport: daySum('sport', d) });
+    }
+    if (foodDays.length < 10) return { base: formula, adjusted: false };
+    // weight trend in kg per day (least squares)
+    const xs = ws.map((w) => daysBetween(from, w.date)), ys = ws.map((w) => w.value);
+    const mx = xs.reduce((a, b) => a + b, 0) / xs.length, my = ys.reduce((a, b) => a + b, 0) / ys.length;
+    let num = 0, den = 0;
+    xs.forEach((x, i) => { num += (x - mx) * (ys[i] - my); den += (x - mx) ** 2; });
+    const slope = den ? num / den : 0;
+    const avgIn = foodDays.reduce((a, d) => a + d.food, 0) / foodDays.length;
+    const avgSport = foodDays.reduce((a, d) => a + d.sport, 0) / foodDays.length;
+    const observed = avgIn - avgSport - slope * KCAL_PER_KG;
+    const clamped = Math.min(formula * 1.3, Math.max(formula * 0.7, observed));
+    return { base: (formula + clamped) / 2, adjusted: true };
+  }
+
+  function energyStats() {
+    const p = state.body.profile;
+    const kg = smoothWeight();
+    const cal = calibratedBurn(p, kg);
+    const base = cal.base;
+    const days = [];
+    let sport14 = 0;
+    for (let i = 1; i <= 14; i++) { // full days only (today isn't over yet)
+      const d = daysAgoISO(i);
+      const food = daySum('food', d), sport = daySum('sport', d);
+      sport14 += sport;
+      if (food > 0) days.push({ date: d, balance: food - base - sport });
+    }
+    const avgBalance = days.length ? days.reduce((s, x) => s + x.balance, 0) / days.length : null;
+    return { kg, base, adjusted: cal.adjusted, sportPerDay: sport14 / 14, foodDays: days.length, enough: days.length >= 3, avgBalance };
+  }
+
+  function weightGoalReached() {
+    const p = state.body.profile, latest = latestWeight();
+    if (!p || !p.weight_goal || !latest) return false;
+    const start = p.weight_goal_start ?? latest.value;
+    return start >= p.weight_goal ? latest.value <= p.weight_goal : latest.value >= p.weight_goal;
+  }
+
+  function weightPlan() {
+    const p = state.body.profile;
+    const es = energyStats();
+    const today = todayISO();
+    const goal = p.weight_goal && p.weight_goal_date ? {
+      kg: p.weight_goal, date: p.weight_goal_date,
+      startKg: p.weight_goal_start ?? es.kg, startDate: p.weight_goal_start_date || today,
+    } : null;
+    const horizon = goal && goal.date > today ? goal.date : isoFromDate(addDays(new Date(), 60));
+    const ahead = daysBetween(today, horizon);
+    const paceKg = es.enough ? es.kg + (es.avgBalance / KCAL_PER_KG) * ahead : null;
+    let need = null;
+    if (goal && goal.date > today) {
+      need = es.base + es.sportPerDay + ((goal.kg - es.kg) * KCAL_PER_KG) / daysBetween(today, goal.date);
+    }
+    return { es, goal, horizon, paceKg, need, reached: weightGoalReached() };
+  }
+
+  // ----- Pieces of the page -----
+  function weightGoalHTML(plan) {
+    const p = state.body.profile;
+    const g = plan.goal, today = todayISO();
+    const latest = latestWeight().value;
+    const floor = kcalFloor(p);
+    if (!g) {
+      if (!plan.es.enough) return `<p class="pace muted">Log your food on a few days to see where your weight is heading.</p>`;
+      const perWeek = (plan.es.avgBalance * 7) / KCAL_PER_KG;
+      return `<div class="pace">
+        <p>At your current pace: <strong>${esc(signed(perWeek, (v) => `${v.toFixed(1)} kg`))}</strong> a week.</p>
+        <p class="muted">By ${fmtDate(plan.horizon)}: about ${fmtKg(plan.paceKg)}.</p>
+      </div>`;
+    }
+    const losing = g.startKg >= g.kg;
+    const span = Math.abs(g.startKg - g.kg) || 1;
+    const pct = plan.reached ? 100 : Math.round(Math.max(0, Math.min(1, (losing ? g.startKg - latest : latest - g.startKg) / span)) * 100);
+    const overdue = !plan.reached && g.date <= today;
+
+    let pace = '';
+    if (plan.reached) {
+      pace = `<p class="good">You reached your goal. Well done!</p>`;
+    } else if (overdue) {
+      pace = `<p>The goal date has passed. You’re at ${fmtKg(latest)}.</p>`;
+    } else {
+      if (plan.paceKg !== null) {
+        const onTrack = losing ? plan.paceKg <= g.kg + 0.2 : plan.paceKg >= g.kg - 0.2;
+        pace += `<p>At your current pace: <strong>${fmtKg(plan.paceKg)}</strong> by ${fmtDate(g.date)}.
+          <span class="${onTrack ? 'good' : 'muted'}">${onTrack ? 'On track' : `${fmtKg(Math.abs(plan.paceKg - g.kg))} short`}</span></p>`;
+      } else {
+        pace += `<p class="muted">Log your food on a few days to see your pace.</p>`;
+      }
+      if (plan.need !== null) {
+        pace += plan.need < floor
+          ? `<p class="muted">Staying on plan would mean eating under ${fmtKcal(floor)} kcal a day, which isn’t recommended. Consider a later date.</p>`
+          : `<p>To stay on plan: about <strong>${fmtKcal(round10(plan.need))} kcal</strong> a day.</p>`;
+      }
+    }
+    return `<div class="goal-block ${plan.reached ? 'reached' : ''}">
+      <div class="goal-head"><span><strong>Goal:</strong> ${fmtKg(g.kg)} by ${fmtDate(g.date)}</span>
+        ${plan.reached || overdue ? '' : '<button type="button" class="link" data-action="body-goals">Edit</button>'}</div>
+      <div class="goal-bar" role="progressbar" aria-label="Weight goal progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${pct}"><i style="width:${pct}%"></i></div>
+      <div class="goal-foot"><span>Started at ${fmtKg(g.startKg)}</span><span>${plan.reached || overdue ? '' : timeLeft(daysBetween(today, g.date))}</span></div>
+      <div class="pace">${pace}</div>
+      ${plan.reached || overdue ? '<button type="button" class="btn wide" style="margin-top:12px" data-action="body-goals" data-fresh="1">Set a new goal</button>' : ''}
+    </div>`;
+  }
+
+  // Daily balance for the last 7 full days: below the line = ate less than burned
+  function energyBars(es, color) {
+    const days = [];
+    for (let i = 7; i >= 1; i--) {
+      const d = daysAgoISO(i);
+      const food = daySum('food', d);
+      days.push({
+        letter: parseISO(d).toLocaleDateString(undefined, { weekday: 'narrow' }),
+        bal: food > 0 ? food - es.base - daySum('sport', d) : null,
+      });
+    }
+    const max = Math.max(300, ...days.filter((x) => x.bal !== null).map((x) => Math.abs(x.bal)));
+    const W = 300, mid = 50, half = 42, bw = 26, gap = (W - 7 * bw) / 6;
+    const bars = days.map((x, i) => {
+      const cx = i * (bw + gap);
+      const label = `<text class="bar-label" x="${cx + bw / 2}" y="${mid + half + 18}" text-anchor="middle">${esc(x.letter)}</text>`;
+      if (x.bal === null) return `<circle cx="${cx + bw / 2}" cy="${mid}" r="3" fill="var(--line)"/>${label}`;
+      const h = Math.max(2, (Math.abs(x.bal) / max) * half);
+      return `<rect x="${cx}" y="${x.bal > 0 ? mid - h : mid}" width="${bw}" height="${h.toFixed(1)}" rx="4" fill="${color}"/>${label}`;
+    }).join('');
+    return `<svg class="energy-bars" viewBox="0 0 ${W} ${mid + half + 24}" aria-hidden="true">
+      <line x1="0" y1="${mid}" x2="${W}" y2="${mid}" stroke="var(--muted)" stroke-width="1"/>${bars}</svg>`;
+  }
+
+  // ----- Screens -----
+  const sexField = (v) => `<fieldset><span class="legend">Sex</span><div class="choice">
+      ${[['female', 'Female'], ['male', 'Male'], ['unspecified', 'Prefer not to say']].map(([k, l]) => `<label><input type="radio" name="sex" value="${k}" ${v === k ? 'checked' : ''}><span>${l}</span></label>`).join('')}
+    </div><p class="hint">Only used in the calorie formula.</p></fieldset>`;
+  const activityField = (v) => `<fieldset><span class="legend">Your days, apart from sport</span><div class="choice stack">
+      ${Object.entries(ACTIVITY).map(([k, a]) => `<label><input type="radio" name="activity" value="${k}" ${(v || 'low') === k ? 'checked' : ''}><span>${a.label}</span></label>`).join('')}
+    </div></fieldset>`;
+  const shareField = (on) => `<label class="check"><input type="checkbox" name="share" ${on ? 'checked' : ''}>
+      <span><strong>Share my weight trend with the family</strong><br>
+      <span class="muted small">They see how much it has changed, never your actual weight or what you eat.</span></span></label>`;
+  const heightInput = (v) => `<label class="field"><span>Height</span><div class="log-value small-inputs">
+      <input class="input" name="height" type="text" inputmode="decimal" autocomplete="off" placeholder="170" value="${v ?? ''}"><span class="unit">cm</span></div></label>`;
+  const birthInput = (v) => `<label class="field"><span>Year of birth</span>
+      <input class="input" name="birth_year" type="text" inputmode="numeric" autocomplete="off" placeholder="1985" value="${v ?? ''}"></label>`;
+
+  function readProfileForm(form) {
+    const height = parseNum(fld(form, 'height').value);
+    const by = parseInt(fld(form, 'birth_year').value, 10);
+    const sexEl = form.querySelector('[name=sex]:checked');
+    const actEl = form.querySelector('[name=activity]:checked');
+    const pin = fld(form, 'pin') ? fld(form, 'pin').value.trim() : '';
+    const year = new Date().getFullYear();
+    let error = null;
+    if (!(height >= 100 && height <= 250)) error = 'Enter your height in centimetres, e.g. 170.';
+    else if (!(by >= 1900 && by <= year - 4)) error = 'Enter your year of birth, e.g. 1985.';
+    else if (!sexEl) error = 'Pick an option for sex (or “Prefer not to say”).';
+    else if (pin && !/^[0-9]{4}$/.test(pin)) error = 'The PIN must be exactly 4 digits.';
+    return {
+      error, pin,
+      data: { height_cm: height, birth_year: by, sex: sexEl && sexEl.value, activity: actEl ? actEl.value : 'low', share_weight: fld(form, 'share').checked },
+    };
+  }
+
+  function viewBodyPin() {
+    return `<div class="welcome" style="padding-top:8vh">
+      <h1>Body</h1>
+      <p class="muted" style="margin:8px 0 22px">Enter your PIN to open this page.</p>
+      <form data-form="body-pin" novalidate>
+        <input class="input code" name="pin" type="password" inputmode="numeric" maxlength="4" autocomplete="off" placeholder="••••" aria-label="PIN">
+        <button class="btn primary big" type="submit" style="margin-top:14px">Unlock</button>
+        <p class="error-text" data-error ${state.bodyLocked === 'wrong' ? '' : 'hidden'}>${state.bodyLocked === 'wrong' ? 'That PIN isn’t right. Try again.' : ''}</p>
+      </form>
+      <p class="hint" style="margin-top:22px">Forgot it? The README explains how to reset it.</p>
+    </div>`;
+  }
+
+  function viewBodySetup() {
+    const p = state.body.profile || {};
+    return `<h1 class="page-title">Body</h1>
+      <p class="page-sub">Track your weight and calories, and see where your habits are taking you. Private to you unless you choose to share.</p>
+      <form class="panel" data-form="body-setup" novalidate>
+        <h3 style="margin-bottom:4px">About you</h3>
+        <p class="muted small" style="margin-bottom:16px">Used for your BMI and to estimate the calories your body burns.</p>
+        <div class="grid2">${heightInput(p.height_cm)}
+          <label class="field"><span>Weight now</span><div class="log-value small-inputs">
+            <input class="input" name="weight" type="text" inputmode="decimal" autocomplete="off" placeholder="70"><span class="unit">kg</span></div></label>
+        </div>
+        ${birthInput(p.birth_year)}
+        ${sexField(p.sex)}
+        ${activityField(p.activity)}
+        ${shareField(p.share_weight)}
+        ${p.has_pin ? '' : `<label class="field"><span>PIN <span class="muted small">(optional)</span></span>
+          <input class="input pin" name="pin" type="password" inputmode="numeric" maxlength="4" autocomplete="new-password" placeholder="4 digits">
+          <span class="hint">With a PIN, only you can open this page, even if someone else taps your name.</span></label>`}
+        <button class="btn primary big" type="submit">Save and continue</button>
+        <p class="error-text" data-error hidden></p>
+      </form>`;
+  }
+
+  function viewBody() {
+    const m = me();
+    if (state.bodyLocked) return viewBodyPin();
+    if (state.bodyError) {
+      return `<div class="center-note"><h2>Couldn’t load this page</h2><p>${esc(state.bodyError)}</p>
+        <p style="margin-top:18px"><button type="button" class="btn primary" data-action="body-retry">Try again</button></p></div>`;
+    }
+    if (!state.body || state.body.memberId !== m.id) { ensureBody(); return '<div class="center-note"><p>Loading…</p></div>'; }
+    const p = state.body.profile;
+    if (!p || !p.height_cm || !bLogs('weight').length) return viewBodySetup();
+
+    const plan = weightPlan();
+    const es = plan.es;
+    const latest = latestWeight();
+    const today = todayISO();
+    const eaten = daySum('food', today);
+    const sportToday = daySum('sport', today);
+    const burn = es.base + sportToday;
+    const age = ageOf(p);
+    const adult = age === null || age >= 18;
+    const bmi = bmiOf(p, latest.value);
+
+    const week7 = [];
+    for (let i = 1; i <= 7; i++) { const d = daysAgoISO(i); const f = daySum('food', d); if (f > 0) week7.push(f - es.base - daySum('sport', d)); }
+    const avg7 = week7.length ? week7.reduce((s, x) => s + x, 0) / week7.length : null;
+    const monday = isoFromDate(mondayOf(new Date()));
+    const sportWeek = bLogs('sport').filter((l) => l.date >= monday).reduce((s, l) => s + l.value, 0);
+
+    const recentAll = state.body.logs.filter((l) => l.date >= daysAgoISO(13)).slice().reverse();
+    const recent = state.bodyShowAll ? recentAll : recentAll.slice(0, 10);
+    const kindName = { weight: 'Weight', food: 'Food', sport: 'Sport' };
+
+    return `<header class="top">
+        <div><p class="kicker">${p.share_weight ? 'Weight trend shared with family' : 'Private to you'}${p.has_pin ? ', locked with PIN' : ''}</p><h1>Body</h1></div>
+      </header>
+      <div class="log-buttons">
+        <button type="button" class="btn primary" data-action="body-log" data-kind="weight">+ Weight</button>
+        <button type="button" class="btn primary" data-action="body-log" data-kind="food">+ Food</button>
+        <button type="button" class="btn primary" data-action="body-log" data-kind="sport">+ Sport</button>
+      </div>
+
+      <div class="panel section">
+        <h3>Today</h3>
+        <div class="energy-row">
+          <div class="en"><span class="label">Eaten</span><span class="value">${fmtKcal(eaten)}</span><span class="sub">${p.kcal_target ? `of ${fmtKcal(p.kcal_target)} kcal` : 'kcal'}</span></div>
+          <div class="en"><span class="label">Burned (est.)</span><span class="value">${fmtKcal(burn)}</span><span class="sub">${sportToday ? `incl. ${fmtKcal(sportToday)} sport` : 'kcal'}</span></div>
+          <div class="en"><span class="label">Balance</span><span class="value">${eaten ? esc(signed(eaten - burn, fmtKcal)) : '–'}</span><span class="sub">${eaten ? 'kcal' : 'log food first'}</span></div>
+        </div>
+        ${p.kcal_target ? `<div class="goal-bar ${eaten > p.kcal_target ? 'over' : ''}" style="margin-top:12px"><i style="width:${Math.min(100, Math.round((eaten / p.kcal_target) * 100))}%"></i></div>` : ''}
+      </div>
+
+      <div class="section">
+        <div class="section-head"><h3>Weight</h3>${plan.goal ? '' : '<button type="button" class="link" data-action="body-goals">Set goals</button>'}</div>
+        <div class="weight-now"><span class="wn-value">${fmtKg(latest.value)}</span>
+          <span class="muted small">${relDay(latest.date)}. BMI ${bmi.toFixed(1)}${adult ? `, ${bmiText(bmi)}` : ''}</span></div>
+        ${weightGoalHTML(plan)}
+        <div style="margin-top:16px">${rangeChips()}</div>
+        <div class="chart-box"><canvas id="weight-chart" role="img" aria-label="Your weight over time, with where your current pace leads"></canvas></div>
+        <div class="chart-legend">
+          <span><i style="--c:${esc(m.color)}"></i>Your weight</span>
+          ${plan.paceKg !== null ? `<span><i class="dots" style="--c:${esc(m.color)}"></i>Current pace</span>` : ''}
+          ${plan.goal ? '<span><i class="dash" style="--c:var(--goal)"></i>Goal plan</span>' : ''}
+        </div>
+      </div>
+
+      <div class="section">
+        <h3 style="margin-bottom:12px">Energy</h3>
+        <div class="panel">
+          <p><strong>Last 7 days</strong> <span class="muted">${avg7 !== null ? `average ${esc(signed(avg7, fmtKcal))} kcal a day` : 'no food logged yet'}</span></p>
+          ${energyBars(es, m.color)}
+          <p class="hint">Below the line: you ate less than you burned. Above: more. All calorie numbers are estimates${es.adjusted ? ', adjusted using how your weight has actually changed' : ''}.</p>
+          ${p.sport_target ? `<div style="margin-top:14px"><p><strong>Sport this week:</strong> ${fmtKcal(sportWeek)} of ${fmtKcal(p.sport_target)} kcal</p>
+            <div class="goal-bar ${sportWeek >= p.sport_target ? 'done' : ''}" style="margin-top:8px"><i style="width:${Math.min(100, Math.round((sportWeek / p.sport_target) * 100))}%"></i></div></div>` : ''}
+        </div>
+      </div>
+
+      <div class="section">
+        <h3 style="margin-bottom:6px">Recent logs</h3>
+        ${recent.length ? `<ul class="history">
+          ${recent.map((l, i) => {
+            const newDay = i === 0 || recent[i - 1].date !== l.date;
+            return `<li class="${newDay ? '' : 'same-day'}">
+              <span class="h-date">${newDay ? fmtDate(l.date) : ''}</span>
+              <span class="h-main"><span class="h-val">${l.kind === 'weight' ? fmtKg(l.value) : `${fmtKcal(l.value)} kcal`}</span>
+                <br><span class="h-note">${kindName[l.kind]}${l.label ? `: ${esc(l.label)}` : ''}</span></span>
+              <button type="button" class="icon-btn" data-action="delete-body-log" data-id="${l.id}" aria-label="Delete this log">${ICONS.trash}</button>
+            </li>`;
+          }).join('')}
+        </ul>${recentAll.length > recent.length ? '<button type="button" class="btn wide" style="margin-top:12px" data-action="body-show-all">Show more</button>' : ''}` : '<p class="muted">Nothing logged in the last two weeks.</p>'}
+      </div>
+
+      <div class="section btn-row">
+        <button type="button" class="btn" data-action="body-goals">Goals</button>
+        <button type="button" class="btn" data-action="body-profile">Profile and privacy</button>
+      </div>`;
+  }
+
+  function drawWeightChart(plan) {
+    const canvas = $('#weight-chart');
+    if (!canvas || !window.Chart) return;
+    const css = getComputedStyle(document.documentElement);
+    const muted = css.getPropertyValue('--muted').trim();
+    const line = css.getPropertyValue('--line').trim();
+    const goalColor = css.getPropertyValue('--goal').trim();
+    const color = me().color;
+    const all = bLogs('weight');
+    const shown = inRange(all);
+    const t = (iso) => parseISO(iso).getTime();
+    const pts = (shown.length ? shown : all.slice(-1)).map((w) => ({ x: t(w.date), y: w.value }));
+
+    const datasets = [{
+      label: 'weight', data: pts, borderColor: color, backgroundColor: color,
+      borderWidth: 3, tension: 0.25, pointRadius: 3.5, pointHoverRadius: 7,
+    }];
+    if (plan.paceKg !== null) {
+      datasets.push({
+        label: 'pace', data: [{ x: t(todayISO()), y: plan.es.kg }, { x: t(plan.horizon), y: plan.paceKg }],
+        borderColor: color, backgroundColor: color, borderDash: [2, 5], borderWidth: 3, borderCapStyle: 'round',
+        pointRadius: [0, 4], tension: 0,
+      });
+    }
+    if (plan.goal) {
+      datasets.push({
+        label: 'plan', data: [{ x: t(plan.goal.startDate), y: plan.goal.startKg }, { x: t(plan.goal.date), y: plan.goal.kg }],
+        borderColor: goalColor, backgroundColor: goalColor, borderDash: [7, 5], borderWidth: 2,
+        pointRadius: [0, 5], tension: 0,
+      });
+    }
+    const xs = datasets.flatMap((d) => d.data.map((p) => p.x));
+    let xMin = Math.min(...xs), xMax = Math.max(...xs);
+    if (xMin === xMax) { xMin -= 3 * 86400000; xMax += 3 * 86400000; }
+    const names = { weight: '', pace: 'At current pace: ', plan: 'Goal plan: ' };
+
+    charts.push(new window.Chart(canvas, {
+      type: 'line',
+      data: { datasets },
+      options: {
+        responsive: true, maintainAspectRatio: false, animation: false,
+        layout: { padding: { top: 8, right: 8 } },
+        scales: {
+          x: {
+            type: 'linear', min: xMin, max: xMax, grid: { display: false }, border: { color: line },
+            ticks: { color: muted, maxTicksLimit: 5, maxRotation: 0, callback: (v) => new Date(v).toLocaleDateString(undefined, { day: 'numeric', month: 'short' }) },
+          },
+          y: { grace: '8%', grid: { color: line }, border: { display: false }, ticks: { color: muted, maxTicksLimit: 5, callback: (v) => fmtNum(v) } },
+        },
+        plugins: {
+          legend: { display: false },
+          tooltip: {
+            displayColors: false,
+            filter: (item) => item.dataset.label === 'weight' || item.dataIndex === 1,
+            callbacks: {
+              title: (items) => new Date(items[0].parsed.x).toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' }),
+              label: (item) => names[item.dataset.label] + fmtKg(item.parsed.y),
+            },
+          },
+        },
+      },
+    }));
+  }
+
+  // ----- Body sheets -----
+  function openBodyLogSheet(kind) {
+    const today = todayISO();
+    const last = latestWeight();
+    const existing = kind === 'weight' ? bLogs('weight').find((l) => l.date === today) : null;
+    const title = { weight: 'Log weight', food: 'Log food', sport: 'Log sport' }[kind];
+    openSheet(`<form data-form="body-log" data-kind="${kind}" novalidate>
+      <h2>${title}</h2>
+      <div class="log-value">
+        <input class="input" name="value" type="text" inputmode="decimal" autocomplete="off" placeholder="${kind === 'weight' && last ? last.value : '0'}" aria-label="Amount">
+        <span class="unit">${kind === 'weight' ? 'kg' : 'kcal'}</span>
+      </div>
+      ${kind === 'food' ? `<div class="chips" style="margin:14px 0 2px">${['Breakfast', 'Lunch', 'Dinner', 'Snack'].map((l) => `<button type="button" class="chip" data-action="set-label" data-label="${l}" aria-pressed="false">${l}</button>`).join('')}</div>` : ''}
+      ${kind !== 'weight' ? `<label class="field" style="margin-top:12px"><span class="small">${kind === 'food' ? 'What was it? (optional)' : 'What did you do? (optional)'}</span>
+        <input class="input" name="label" maxlength="120" placeholder="${kind === 'food' ? 'e.g. rice, beans and salad' : 'e.g. 45 min cycling'}"></label>` : ''}
+      ${kind === 'sport' ? '<p class="hint" style="margin:-8px 0 12px">Watches and fitness apps usually show calories burned.</p>' : ''}
+      <label class="field" style="margin-top:12px"><span class="small">Date</span><input class="input" name="date" type="date" value="${today}" max="${today}"></label>
+      ${existing ? `<p class="hint" style="margin:-6px 0 12px">Replaces today’s ${fmtKg(existing.value)}.</p>` : ''}
+      <div class="btn-row" style="margin-top:8px">
+        <button type="button" class="btn" data-action="close-sheet">Cancel</button>
+        <button type="submit" class="btn primary">Save</button>
+      </div>
+      <p class="error-text" data-error hidden></p>
+    </form>`);
+  }
+
+  function openBodyGoalsSheet(fresh) {
+    const p = state.body.profile;
+    const es = energyStats();
+    const age = ageOf(p);
+    const adult = age === null || age >= 18;
+    const [lo, hi] = healthyRange(p);
+    const keepGoal = !fresh && p.weight_goal;
+    const due = keepGoal && p.weight_goal_date > todayISO() ? p.weight_goal_date : isoFromDate(addDays(new Date(), 84));
+    openSheet(`<form data-form="body-goals" data-fresh="${fresh ? 1 : 0}" novalidate>
+      <h2>Goals</h2>
+      <div class="field"><span class="legend">Weight goal</span>
+        <div class="log-value small-inputs"><input class="input" name="goal_weight" type="text" inputmode="decimal" autocomplete="off" placeholder="${Math.round(es.kg)}" value="${keepGoal ? p.weight_goal : ''}"><span class="unit">kg</span></div>
+        <p class="hint">Now: ${fmtKg(latestWeight().value)}.${adult ? ` A healthy range for your height is ${Math.ceil(lo)}–${Math.floor(hi)} kg.` : ' For under-18s, weight goals are best set together with a doctor.'}</p>
+      </div>
+      <label class="field"><span>By</span><input class="input" name="goal_date" type="date" value="${due}" min="${isoFromDate(addDays(new Date(), 1))}"></label>
+      <div class="field"><span class="legend">Daily food target <span class="muted small">(optional)</span></span>
+        <div class="log-value small-inputs"><input class="input" name="kcal_target" type="text" inputmode="numeric" autocomplete="off" placeholder="${round10(es.base)}" value="${p.kcal_target ?? ''}"><span class="unit">kcal</span></div>
+        <p class="hint" data-suggest></p>
+      </div>
+      <div class="field"><span class="legend">Weekly sport target <span class="muted small">(optional)</span></span>
+        <div class="log-value small-inputs"><input class="input" name="sport_target" type="text" inputmode="numeric" autocomplete="off" placeholder="1500" value="${p.sport_target ?? ''}"><span class="unit">kcal</span></div>
+      </div>
+      <div class="btn-row" style="margin-top:8px">
+        <button type="button" class="btn" data-action="close-sheet">Cancel</button>
+        <button type="submit" class="btn primary">Save goals</button>
+      </div>
+      ${keepGoal ? '<p style="margin-top:16px;text-align:center"><button type="button" class="link" data-action="remove-weight-goal">Remove weight goal</button></p>' : ''}
+      <p class="error-text" data-error hidden></p>
+    </form>`);
+    updateSuggestion();
+  }
+
+  // Live calorie suggestion while the weight goal is typed
+  function updateSuggestion() {
+    const form = $('#sheet-root form[data-form="body-goals"]');
+    if (!form) return;
+    const el = form.querySelector('[data-suggest]');
+    const p = state.body.profile;
+    const es = energyStats();
+    const kg = parseNum(fld(form, 'goal_weight').value);
+    const date = fld(form, 'goal_date').value;
+    let html = `Your body burns about ${fmtKcal(round10(es.base))} kcal a day, plus sport.`;
+    if (kg >= 20 && kg <= 400 && date > todayISO()) {
+      const need = round10(es.base + es.sportPerDay + ((kg - es.kg) * KCAL_PER_KG) / daysBetween(todayISO(), date));
+      html = need < kcalFloor(p)
+        ? `Reaching ${fmtKg(kg)} by then would mean eating under ${fmtKcal(kcalFloor(p))} kcal a day, which isn’t recommended. Try a later date.`
+        : `For this goal: about ${fmtKcal(need)} kcal a day. <button type="button" class="link" data-action="use-suggested" data-value="${need}">Use this</button>`;
+    }
+    el.innerHTML = html;
+  }
+
+  function openBodyProfileSheet() {
+    const p = state.body.profile;
+    openSheet(`<form data-form="body-profile" novalidate>
+      <h2>Profile and privacy</h2>
+      <div class="grid2">${heightInput(p.height_cm)}${birthInput(p.birth_year)}</div>
+      ${sexField(p.sex)}
+      ${activityField(p.activity)}
+      ${shareField(p.share_weight)}
+      <div class="field"><span class="legend">PIN</span>
+        ${p.has_pin ? '<p class="hint" style="margin:0 0 8px">This page is locked with a PIN. Type a new one to change it.</p>' : '<p class="hint" style="margin:0 0 8px">With a PIN, only you can open this page, even if someone else taps your name.</p>'}
+        <input class="input pin" name="pin" type="password" inputmode="numeric" maxlength="4" autocomplete="new-password" placeholder="${p.has_pin ? 'New PIN' : '4 digits (optional)'}">
+        ${p.has_pin ? '<button type="button" class="link" data-action="remove-pin">Remove PIN</button>' : ''}
+      </div>
+      <div class="btn-row" style="margin-top:8px">
+        <button type="button" class="btn" data-action="close-sheet">Cancel</button>
+        <button type="submit" class="btn primary">Save</button>
+      </div>
+      <p class="error-text" data-error hidden></p>
+    </form>`);
+  }
+
+  // Save a body log straight away, then sync in the background
+  async function saveBodyLog(kind, value, date, label) {
+    const log = { id: newId(), kind, value, date, label };
+    const hadReached = kind === 'weight' && weightGoalReached();
+    const replaced = kind === 'weight' ? state.body.logs.filter((l) => l.kind === 'weight' && l.date === date) : [];
+    state.body.logs = state.body.logs.filter((l) => !replaced.includes(l));
+    state.body.logs.push(log);
+    sortByDate(state.body.logs);
+    closeSheet();
+    render();
+    if (kind === 'weight' && !hadReached && weightGoalReached()) toast('You reached your weight goal!', true);
+    else toast('Saved');
+    try {
+      await rpc('add_body_log', {
+        p_code: state.code, p_member_id: state.meId, p_pin: bodyPin(), p_id: log.id,
+        p_kind: kind, p_value: value, p_date: date, p_label: label,
+      }, { retries: 2 });
+      if (kind === 'weight' && state.body && state.body.profile.share_weight) loadFamily();
+    } catch (e) {
+      if (state.body) {
+        state.body.logs = state.body.logs.filter((l) => l.id !== log.id).concat(replaced);
+        sortByDate(state.body.logs);
+      }
+      render();
+      toast(`Couldn’t save. ${e.message}`);
+    }
+  }
+
+  // =====================================================================
   // Rendering
   // =====================================================================
   function render() {
@@ -1003,6 +1610,7 @@
     switch (r.name) {
       case 'timer': html = viewTimer(); break;
       case 'family': html = viewFamily(); break;
+      case 'body': html = viewBody(); break;
       case 'settings': html = viewSettings(); tab = 'home'; break;
       case 'exercise': {
         html = viewExercise(r.id);
@@ -1021,6 +1629,7 @@
       const ex = exerciseById(r.id);
       if (ex) drawDetailChart(ex, inRange(entriesFor(ex.id)), memberById(ex.member_id).color);
     }
+    if (r.name === 'body' && $('#weight-chart')) drawWeightChart(weightPlan());
   }
 
   // Don't redraw underneath someone who is halfway through typing
@@ -1114,7 +1723,7 @@
       </div>`;
     }
     return `<div class="log-value small-inputs">
-      <input class="input" name="${prefix}" type="number" inputmode="decimal" min="0" step="any" placeholder="0" value="${value == null ? '' : value}" aria-label="Amount">
+      <input class="input" name="${prefix}" type="text" inputmode="decimal" autocomplete="off" placeholder="0" value="${value == null ? '' : value}" aria-label="Amount">
       ${ex.unit_label ? `<span class="unit">${esc(ex.unit_label)}</span>` : ''}
     </div>`;
   }
@@ -1125,8 +1734,7 @@
       if (Number(se) >= 60) return NaN;
       return Math.round(Number(mi || 0) * 60 + Number(se || 0));
     }
-    const v = fld(form, prefix).value;
-    return v === '' ? NaN : Number(v);
+    return parseNum(fld(form, prefix).value);
   }
 
   function openGoalSheet(ex, fresh) {
@@ -1196,18 +1804,25 @@
   // Events
   // =====================================================================
   function showFormError(form, msg) {
-    const el = form.querySelector('[data-error]');
+    const el = form && form.querySelector('[data-error]');
     if (el) { el.textContent = msg; el.hidden = false; }
-    else toast(msg);
+    toast(msg); // shown at the top, where the keyboard can't cover it
   }
   async function withBusy(form, fn) {
     const btns = $$('[type=submit]', form);
+    const main = btns[btns.length - 1];
+    const label = main ? main.textContent : '';
     const err = form.querySelector('[data-error]');
     if (err) err.hidden = true;
+    if (document.activeElement) document.activeElement.blur();
     btns.forEach((b) => { b.disabled = true; });
+    if (main) main.textContent = 'Saving…';
     try { await fn(); }
     catch (e) { showFormError(form, e.message); }
-    finally { btns.forEach((b) => { if (b.isConnected) b.disabled = false; }); }
+    finally {
+      btns.forEach((b) => { if (b.isConnected) b.disabled = false; });
+      if (main && main.isConnected) main.textContent = label;
+    }
   }
 
   // Remember which submit button was pressed (for older browsers without e.submitter)
@@ -1253,7 +1868,7 @@
       const name = fld(form, 'name').value.trim();
       if (!name) return showFormError(form, 'Enter a family name.');
       await withBusy(form, async () => {
-        const f = await rpc('create_family', { p_name: name });
+        const f = await rpc('create_family', { p_name: name }, { retries: 0 });
         state.code = f.code;
         store.set('ff_code', state.code);
         setMe(null);
@@ -1268,7 +1883,7 @@
       if (!name) return showFormError(form, 'Enter your name.');
       const color = (form.querySelector('[name=color]:checked') || {}).value || COLORS[0];
       await withBusy(form, async () => {
-        const r = await rpc('add_member', { p_code: state.code, p_name: name, p_color: color });
+        const r = await rpc('add_member', { p_code: state.code, p_name: name, p_color: color }, { retries: 0 });
         setMe(r.id);
         await loadFamily();
         go('home');
@@ -1307,40 +1922,52 @@
         if (!(value > 0)) return showFormError(form, 'Start the stopwatch, or type a time.');
       } else {
         const raw = fld(form, 'value').value;
-        if (raw === '') return showFormError(form, 'Enter a number.');
-        value = Number(raw);
+        if (raw.trim() === '') return showFormError(form, 'Enter a number.');
+        value = parseNum(raw);
         if (!Number.isFinite(value) || value < 0) return showFormError(form, 'Enter a number of 0 or more.');
       }
       const date = fld(form, 'date').value || todayISO();
       if (date > todayISO()) return showFormError(form, 'The date can’t be in the future.');
 
+      // Show the entry straight away, then save it in the background
       const before = progressSnapshot(ex);
-      await withBusy(form, async () => {
+      const entry = {
+        id: newId(), member_id: state.meId, exercise_id: ex.id,
+        value, date, note: fld(form, 'note').value.trim() || null,
+      };
+      if (document.activeElement) document.activeElement.blur();
+      state.data.entries.push(entry);
+      sortByDate(state.data.entries);
+      if (usedStopwatch || ex.unit_type === 'duration') { sw.running = false; sw.base = 0; }
+      if (rest) { cd.base = 0; cd.done = false; cd.t0 = Date.now(); cd.running = true; }
+      render();
+
+      const after = progressSnapshot(ex);
+      const g = goalFor(ex.id);
+      if (!before.goalReached && after.goalReached) {
+        toast(g.kind === 'monthly' ? 'Monthly goal reached!' : `Goal reached: ${fmtValue(ex, g.target_value)}!`, true);
+      } else if (before.best !== null && isBetter(ex, value, before.best)) {
+        toast('New personal best!', true);
+      } else if (!before.weekMet && after.weekMet) {
+        toast(`Weekly goal met: ${plural(me().weekly_goal, 'day', 'days')}!`, true);
+      } else {
+        toast(rest ? 'Saved. Rest started.' : 'Entry saved');
+      }
+      if (rest) {
+        const panel = $('#rest-panel');
+        if (panel) panel.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }
+
+      try {
         await rpc('add_entry', {
           p_code: state.code, p_member_id: state.meId, p_exercise_id: ex.id,
-          p_value: value, p_date: date, p_note: fld(form, 'note').value.trim() || null,
-        });
-        if (usedStopwatch || ex.unit_type === 'duration') { sw.running = false; sw.base = 0; }
-        if (rest) { cd.base = 0; cd.done = false; cd.t0 = Date.now(); cd.running = true; }
-        await loadFamily();
+          p_value: value, p_date: date, p_note: entry.note, p_id: entry.id,
+        }, { retries: 2 });
+      } catch (err) {
+        state.data.entries = state.data.entries.filter((x) => x.id !== entry.id);
         render();
-
-        const after = progressSnapshot(ex);
-        const g = goalFor(ex.id);
-        if (!before.goalReached && after.goalReached) {
-          toast(g.kind === 'monthly' ? 'Monthly goal reached!' : `Goal reached: ${fmtValue(ex, g.target_value)}!`, true);
-        } else if (before.best !== null && isBetter(ex, value, before.best)) {
-          toast('New personal best!', true);
-        } else if (!before.weekMet && after.weekMet) {
-          toast(`Weekly goal met: ${plural(me().weekly_goal, 'day', 'days')}!`, true);
-        } else {
-          toast(rest ? 'Saved. Rest started.' : 'Entry saved');
-        }
-        if (rest) {
-          const panel = $('#rest-panel');
-          if (panel) panel.scrollIntoView({ behavior: 'smooth', block: 'center' });
-        }
-      });
+        toast(`Couldn’t save ${fmtValue(ex, value)}. ${err.message}`);
+      }
     }
 
     if (kind === 'exercise') {
@@ -1422,6 +2049,124 @@
         toast('Weekly goal saved');
       });
     }
+
+    // ----- Body page forms -----
+    if (kind === 'body-setup') {
+      const f = readProfileForm(form);
+      const weight = parseNum(fld(form, 'weight').value);
+      if (f.error) return showFormError(form, f.error);
+      if (!(weight >= 20 && weight <= 400)) return showFormError(form, 'Enter your weight in kg, e.g. 72.5.');
+      await withBusy(form, async () => {
+        await rpc('update_profile', { p_code: state.code, p_member_id: state.meId, p_pin: bodyPin(), p_data: f.data });
+        if (f.pin) {
+          await rpc('set_body_pin', { p_code: state.code, p_member_id: state.meId, p_pin: bodyPin(), p_new_pin: f.pin });
+          store.set(pinKey(state.meId), f.pin);
+        }
+        await rpc('add_body_log', {
+          p_code: state.code, p_member_id: state.meId, p_pin: bodyPin(), p_id: newId(),
+          p_kind: 'weight', p_value: weight, p_date: todayISO(), p_label: null,
+        }, { retries: 2 });
+        await loadBody();
+        if (f.data.share_weight) await loadFamily();
+        render();
+        toast('All set. Now you can log food and sport.');
+      });
+    }
+
+    if (kind === 'body-pin') {
+      const pin = fld(form, 'pin').value.trim();
+      if (!/^[0-9]{4}$/.test(pin)) return showFormError(form, 'Enter your 4-digit PIN.');
+      await withBusy(form, async () => {
+        store.set(pinKey(state.meId), pin);
+        state.bodyLocked = false;
+        await loadBody();
+        render();
+      });
+    }
+
+    if (kind === 'body-log') {
+      const k = form.dataset.kind;
+      const value = parseNum(fld(form, 'value').value);
+      const date = fld(form, 'date').value || todayISO();
+      if (k === 'weight' ? !(value >= 20 && value <= 400) : !(value > 0 && value <= 10000)) {
+        return showFormError(form, k === 'weight' ? 'Enter your weight in kg, e.g. 72.5.' : 'Enter the calories, e.g. 450.');
+      }
+      if (date > todayISO()) return showFormError(form, 'The date can’t be in the future.');
+      const labelEl = fld(form, 'label');
+      if (document.activeElement) document.activeElement.blur();
+      await saveBodyLog(k, value, date, labelEl ? labelEl.value.trim() || null : null);
+    }
+
+    if (kind === 'body-goals') {
+      const p = state.body.profile;
+      const today = todayISO();
+      const now = latestWeight().value;
+      const gwRaw = fld(form, 'goal_weight').value.trim();
+      const ktRaw = fld(form, 'kcal_target').value.trim();
+      const stRaw = fld(form, 'sport_target').value.trim();
+      const gw = gwRaw === '' ? null : parseNum(gwRaw);
+      const gd = fld(form, 'goal_date').value;
+      const kt = ktRaw === '' ? null : Math.round(parseNum(ktRaw));
+      const stg = stRaw === '' ? null : Math.round(parseNum(stRaw));
+      const data = {};
+
+      if (gw !== null) {
+        if (!(gw >= 20 && gw <= 400)) return showFormError(form, 'Enter a goal weight in kg.');
+        if (!gd || gd <= today) return showFormError(form, 'Pick a goal date after today.');
+        const [lo] = healthyRange(p);
+        if (gw < lo && gw < now) {
+          return showFormError(form, `That’s below the healthy range for your height. Pick ${Math.ceil(lo)} kg or more.`);
+        }
+        const perWeek = (gw - now) / (daysBetween(today, gd) / 7);
+        if (perWeek < -1 || perWeek > 0.5) {
+          const maxRate = perWeek < 0 ? 1 : 0.5;
+          const earliest = isoFromDate(addDays(new Date(), Math.ceil((Math.abs(gw - now) / maxRate) * 7)));
+          return showFormError(form, `That’s about ${Math.abs(perWeek).toFixed(1)} kg a week, faster than the ${perWeek < 0 ? '0.5–1' : '0.25–0.5'} kg a week usually recommended. Try ${fmtDate(earliest)} or later.`);
+        }
+        // Keep the starting point if only the date changes
+        const same = form.dataset.fresh !== '1' && p.weight_goal === gw && p.weight_goal_start != null;
+        Object.assign(data, {
+          weight_goal: gw, weight_goal_date: gd,
+          weight_goal_start: same ? p.weight_goal_start : now,
+          weight_goal_start_date: same ? p.weight_goal_start_date : today,
+        });
+      } else if (form.dataset.fresh !== '1') {
+        Object.assign(data, { weight_goal: null, weight_goal_date: null, weight_goal_start: null, weight_goal_start_date: null });
+      }
+
+      if (kt !== null) {
+        if (!(kt >= 500 && kt <= 8000)) return showFormError(form, 'Enter a daily food target in kcal, e.g. 2000.');
+        if (kt < kcalFloor(p)) return showFormError(form, `Daily targets under ${fmtKcal(kcalFloor(p))} kcal aren’t recommended without medical advice.`);
+      }
+      data.kcal_target = kt;
+      if (stg !== null && !(stg >= 0 && stg <= 50000)) return showFormError(form, 'Enter a weekly sport target in kcal, e.g. 1500.');
+      data.sport_target = stg;
+
+      await withBusy(form, async () => {
+        await rpc('update_profile', { p_code: state.code, p_member_id: state.meId, p_pin: bodyPin(), p_data: data });
+        closeSheet();
+        await loadBody();
+        render();
+        toast('Goals saved');
+      });
+    }
+
+    if (kind === 'body-profile') {
+      const f = readProfileForm(form);
+      if (f.error) return showFormError(form, f.error);
+      await withBusy(form, async () => {
+        await rpc('update_profile', { p_code: state.code, p_member_id: state.meId, p_pin: bodyPin(), p_data: f.data });
+        if (f.pin) {
+          await rpc('set_body_pin', { p_code: state.code, p_member_id: state.meId, p_pin: bodyPin(), p_new_pin: f.pin });
+          store.set(pinKey(state.meId), f.pin);
+        }
+        closeSheet();
+        await loadBody();
+        await loadFamily();
+        render();
+        toast(f.pin ? 'Saved. Your page is locked with your PIN.' : 'Saved');
+      });
+    }
   }
 
   async function act(fn, okMsg) {
@@ -1488,9 +2233,10 @@
 
     // --- People ---
     if (a === 'pick-member') { setMe(el.dataset.id); go('home'); return render(); }
-    if (a === 'switch-person') { setMe(null); location.hash = ''; return render(); }
+    if (a === 'switch-person') { store.set(pinKey(state.meId), null); setMe(null); location.hash = ''; return render(); }
     if (a === 'leave') {
       if (state.data && me() && !confirm('Sign this phone out of the family? Your entries stay saved, and you can rejoin with the invite link.')) return;
+      if (state.data) state.data.members.forEach((m) => store.set(pinKey(m.id), null));
       leaveFamily();
       location.hash = '';
       return render();
@@ -1529,6 +2275,57 @@
       return act(() => rpc('set_weekly_goal', { p_code: state.code, p_member_id: state.meId, p_days: null }), 'Weekly goal removed');
     }
 
+    // --- Body page ---
+    if (a === 'body-log') return openBodyLogSheet(el.dataset.kind);
+    if (a === 'body-goals') return openBodyGoalsSheet(el.dataset.fresh === '1');
+    if (a === 'body-profile') return openBodyProfileSheet();
+    if (a === 'body-retry') { state.bodyError = null; return render(); }
+    if (a === 'body-show-all') { state.bodyShowAll = true; return render(); }
+    if (a === 'set-label') {
+      const input = $('#sheet-root [name=label]');
+      if (input) input.value = el.dataset.label;
+      $$('#sheet-root [data-action="set-label"]').forEach((c) => c.setAttribute('aria-pressed', String(c === el)));
+      return;
+    }
+    if (a === 'use-suggested') {
+      const input = $('#sheet-root [name=kcal_target]');
+      if (input) input.value = el.dataset.value;
+      return;
+    }
+    if (a === 'delete-body-log') {
+      if (!confirm('Delete this log?')) return;
+      const log = state.body.logs.find((l) => l.id === el.dataset.id);
+      state.body.logs = state.body.logs.filter((l) => l !== log);
+      render();
+      try {
+        await rpc('delete_body_log', { p_code: state.code, p_member_id: state.meId, p_pin: bodyPin(), p_log_id: log.id });
+        toast('Deleted');
+      } catch (err) {
+        state.body.logs.push(log); sortByDate(state.body.logs); render();
+        toast(`Couldn’t delete. ${err.message}`);
+      }
+      return;
+    }
+    if (a === 'remove-weight-goal') {
+      closeSheet();
+      return act(async () => {
+        await rpc('update_profile', {
+          p_code: state.code, p_member_id: state.meId, p_pin: bodyPin(),
+          p_data: { weight_goal: null, weight_goal_date: null, weight_goal_start: null, weight_goal_start_date: null },
+        });
+        await loadBody();
+      }, 'Weight goal removed');
+    }
+    if (a === 'remove-pin') {
+      if (!confirm('Remove your PIN? Anyone who taps your name will be able to open this page.')) return;
+      closeSheet();
+      return act(async () => {
+        await rpc('set_body_pin', { p_code: state.code, p_member_id: state.meId, p_pin: bodyPin(), p_new_pin: null });
+        store.set(pinKey(state.meId), null);
+        await loadBody();
+      }, 'PIN removed');
+    }
+
     // --- Invite ---
     if (a === 'share-invite' || a === 'copy-invite') {
       const link = inviteLink();
@@ -1562,6 +2359,9 @@
   document.addEventListener('change', onChange);
   document.addEventListener('input', (e) => {
     const t = e.target;
+    if (t.closest && t.closest('#sheet-root form[data-form="body-goals"]')) updateSuggestion();
+    const er = t.form && t.form.querySelector('[data-error]');
+    if (er) er.hidden = true;
     if (!t.matches('#app input, #app textarea') || t.type === 'date') return;
     t.dataset.dirty = '1';
     // Typing your own time takes over from the stopwatch
