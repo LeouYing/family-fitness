@@ -1836,7 +1836,10 @@
     if (res.status === 404) throw new Error('AI estimates aren’t set up yet (README, part “AI food estimates”). You can use Manual for now.');
     if (res.status === 401) throw new Error('The estimate-food function is refusing the app. Turn off “Verify JWT” for it (README, step A4).');
     if (code.includes('AI_LIMIT')) throw new Error('You’ve reached today’s limit of AI estimates. Use Manual, or try again tomorrow.');
-    if (code.includes('NO_KEY')) throw new Error('The Claude API key isn’t set in Supabase yet (README, step A2).');
+    if (code.includes('AI_BUSY')) throw new Error('The AI is busy or its free limit was reached. Try again in a minute, or use Manual.');
+    if (code.includes('NO_KEY')) throw new Error('The AI key isn’t saved in Supabase yet (README, step A2).');
+    if (code.includes('BAD_KEY')) throw new Error('The AI key was refused. Check the secret in Supabase (README, step A2).');
+    if (code.includes('BAD_MODEL')) throw new Error('The AI model name wasn’t found. Check the model setting at the top of estimate-food.ts.');
     if (/PIN_/.test(code)) throw new Error('Your PIN needs re-entering. Reopen the Body tab and try again.');
     throw new Error((data && data.error) || 'The estimate didn’t work. Try again.');
   }
